@@ -476,7 +476,13 @@ class Bridge:
         user = node.get("user") or {}
         uid = f"MESHTASTIC-{node_id.lstrip('!')}"
         dot = self.mesh_style == "dot"
-        cot_type = "b-m-p-s-m" if dot else self.mesh_cfg.get("cot_type", "a-n-G")
+        role = str(user.get("role", "CLIENT"))
+        if dot:
+            cot_type = "b-m-p-s-m"
+        elif "ROUTER" in role or "REPEATER" in role:
+            cot_type = self.mesh_cfg.get("relay_cot_type", "a-n-G-U-U-S-R-W")   # 2525 signal: radio relay
+        else:
+            cot_type = self.mesh_cfg.get("cot_type", "a-n-G-U-U-S-R")           # 2525 signal: radio
         ev = new_event(uid, cot_type, "m-g", lat, lon, stale, hae=pos.get("altitude", 9999999.0))
         ev.set("start", cot_time(heard))
         d = detail_of(ev)
@@ -489,6 +495,7 @@ class Bridge:
             bits.append(f"short {user['shortName']}")
         if user.get("hwModel"):
             bits.append(str(user["hwModel"]))
+        bits.append(f"role {role}")
         hops = node.get("hopsAway")
         if packet and packet.get("hopStart") is not None and packet.get("hopLimit") is not None:
             hops = packet["hopStart"] - packet["hopLimit"]

@@ -51,7 +51,8 @@ chatroom = "Meshtastic MediumFast" # GeoChat room for that channel; "All Chat Ro
 # chatroom_id = "MESHTASTIC-Meshtastic MediumFast"
 marker_style = "symbol"            # "dot": small spot-map dot (own Overlay Manager group); "symbol": 2525 symbol of cot_type
 dot_color = "#67EA94"              # dot colour (#RRGGBB or #AARRGGBB)
-cot_type = "a-n-G"                 # node markers: neutral ground (public nodes are not our units)
+cot_type = "a-n-G-U-U-S-R"         # 2525 neutral signal unit, radio (public nodes are not our units)
+relay_cot_type = "a-n-G-U-U-S-R-W" # nodes with a ROUTER/REPEATER role: radio relay
 marker_max_age_minutes = 180       # marker stale = last heard + this
 sweep_interval_seconds = 300       # republish all recently heard nodes from the node database
 chat_to_mesh = true                # messages posted in the room -> mesh broadcast on channel_index

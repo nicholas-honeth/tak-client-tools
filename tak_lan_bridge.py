@@ -705,10 +705,20 @@ class Bridge:
         sent = parse_cot_time(ev.get("time"))
         lag = f"{(utcnow() - sent).total_seconds():.1f} s" if sent else "?"
         if text.lower() in ("help", "?"):
-            self.reply(sender_uid, callsign,
-                       "MESH-GW loopback. Anything: echoed. '@<node> text': Meshtastic DM to a node "
-                       "(!id, short or long name; quote names with spaces: @\"Long Name\" hi). "
-                       "'stats': bridge counters. 'roomtest': test message in the mesh room (TAK only). Mesh replies to DMs arrive here.")
+            self.reply(sender_uid, callsign, "\n".join([
+                f"{self.callsign} = Meshtastic gateway (node {self.mesh.node_name(f'!{self.mesh.my_num:08x}') if self.mesh else 'not connected'}).",
+                f"ROOM '{self.mesh_room_name}' (mesh channel {self.mesh_channel}):",
+                "- Messages show the mesh sender as [Long name (SHORT)].",
+                "- Plain text is sent PUBLICLY on the channel as '<your callsign>: text'.",
+                "- '@SHORT text' sends a private Meshtastic DM to that node instead.",
+                "  Also @!a1b2c3d4 or @\"Long Name\". Status and DM replies arrive here.",
+                f"THIS CHAT ({self.callsign}):",
+                "- '@SHORT text' / '@!id text': Meshtastic DM, same as in the room.",
+                "- 'stats': bridge counters. 'roomtest': test message in the room (TAK only).",
+                "- Anything else is echoed back (loopback test).",
+                "Map: mesh nodes are neutral signal symbols (radio / radio relay); tap one for its @!id.",
+                f"Mesh sends are limited to one per {int(float(self.mesh_cfg.get('chat_min_interval_seconds', 15)))} s (duty cycle).",
+            ]))
         elif text.lower() == "roomtest":
             # A message into the mesh room from the bridge itself (TAK only, not sent to the mesh)
             self.tak_users.setdefault(sender_uid, callsign)

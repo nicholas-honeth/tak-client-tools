@@ -49,6 +49,8 @@ device = "/dev/ttyACM0"            # or: host = "192.168.1.50" (node on Wi-Fi, T
 channel_index = 0                  # mesh channel bridged to chat (0 = primary, e.g. public MediumFast)
 chatroom = "Meshtastic MediumFast" # GeoChat room for that channel; "All Chat Rooms" to use All Chat instead
 # chatroom_id = "MESHTASTIC-Meshtastic MediumFast"
+marker_style = "symbol"            # "dot": small spot-map dot (own Overlay Manager group); "symbol": 2525 symbol of cot_type
+dot_color = "#67EA94"              # dot colour (#RRGGBB or #AARRGGBB)
 cot_type = "a-n-G"                 # node markers: neutral ground (public nodes are not our units)
 marker_max_age_minutes = 180       # marker stale = last heard + this
 sweep_interval_seconds = 300       # republish all recently heard nodes from the node database

@@ -91,6 +91,13 @@ def detail_of(ev):
     return d
 
 
+def argb_int(hex_color):
+    """"#RRGGBB" or "#AARRGGBB" -> the signed 32-bit ARGB int ATAK uses in CoT colors."""
+    h = hex_color.lstrip("#")
+    v = int(h if len(h) == 8 else "ff" + h, 16)
+    return v - (1 << 32) if v >= 1 << 31 else v
+
+
 def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0, room_id=ALL_CHAT, room_name=None,
                   members=()):
     """GeoChat message in the shape ATAK sends it. Default: All Chat Rooms. With room_id/room_name
@@ -290,6 +297,10 @@ class Bridge:
         self.mesh_room_name = room
         self.mesh_room_id = room if room == ALL_CHAT else m.get("chatroom_id", f"MESHTASTIC-{room}")
         self.mesh_max_age = timedelta(minutes=float(m.get("marker_max_age_minutes", 180)))
+        # "dot": ATAK spot-map marker (small coloured dot, own "Spot Map" overlay group);
+        # "symbol": a 2525 symbol of cot_type (e.g. the neutral green square a-n-G)
+        self.mesh_style = m.get("marker_style", "symbol")
+        self.mesh_dot_argb = argb_int(m.get("dot_color", "#67EA94"))   # Meshtastic green
         self.callsign = b.get("callsign", self.uid)
         self.pending_dm = {}     # mesh packet id -> (atak uid, atak callsign, node_id, sent monotonic)
         self.dm_peer = {}        # mesh node_id -> (atak uid, atak callsign) that last wrote to it
@@ -464,10 +475,14 @@ class Bridge:
         node = self.mesh.node(node_id)
         user = node.get("user") or {}
         uid = f"MESHTASTIC-{node_id.lstrip('!')}"
-        ev = new_event(uid, self.mesh_cfg.get("cot_type", "a-n-G"), "m-g", lat, lon, stale,
-                       hae=pos.get("altitude", 9999999.0))
+        dot = self.mesh_style == "dot"
+        cot_type = "b-m-p-s-m" if dot else self.mesh_cfg.get("cot_type", "a-n-G")
+        ev = new_event(uid, cot_type, "m-g", lat, lon, stale, hae=pos.get("altitude", 9999999.0))
         ev.set("start", cot_time(heard))
         d = detail_of(ev)
+        if dot:
+            ET.SubElement(d, "usericon", iconsetpath=f"COT_MAPPING_SPOTMAP/b-m-p-s-m/{self.mesh_dot_argb}")
+            ET.SubElement(d, "color", argb=str(self.mesh_dot_argb))
         ET.SubElement(d, "contact", callsign=user.get("longName") or user.get("shortName") or node_id)
         bits = [f"Meshtastic {node_id}"]
         if user.get("shortName"):

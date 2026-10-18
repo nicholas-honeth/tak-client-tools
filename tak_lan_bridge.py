@@ -117,10 +117,11 @@ def argb_int(hex_color):
 
 
 def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0, room_id=ALL_CHAT, room_name=None,
-                  members=()):
+                  members=(), names=None):
     """GeoChat message in the shape ATAK sends it. Default: All Chat Rooms. With room_id/room_name
-    it is a named group chat; ATAK opens a conversation for an unknown room id on first receipt,
-    and replies go back to the room id (members are the chatgrp uids after the sender)."""
+    it is a user group chat: chatgrp lists the sender + members, and a <hierarchy> block
+    (Groups -> room -> contacts, names from `names`) lets ATAK build the group in its contact
+    tree. Without the hierarchy ATAK only shows a notification; WinTAK shows the room anyway."""
     msg_id = str(uuid.uuid4())
     room_name = room_name or room_id
     ev = new_event(f"GeoChat.{sender_uid}.{room_id}.{msg_id}", "b-t-f", "h-g-i-g-o",
@@ -135,6 +136,13 @@ def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0, room_id=ALL_CHAT
     for i, m in enumerate(members or ([room_id] if room_id == ALL_CHAT else []), start=1):
         uids[f"uid{i}"] = m
     ET.SubElement(chat, "chatgrp", id=room_id, **uids)
+    if room_id != ALL_CHAT:
+        names = names or {}
+        hier = ET.SubElement(chat, "hierarchy")
+        top = ET.SubElement(hier, "group", name="Groups", uid="UserGroups")
+        grp = ET.SubElement(top, "group", name=room_name, uid=room_id)
+        for u in dict.fromkeys(uids.values()):
+            ET.SubElement(grp, "contact", name=names.get(u, callsign if u == sender_uid else u), uid=u)
     ET.SubElement(d, "link", uid=sender_uid, type="a-f-G-U-C", relation="p-p")
     remarks = ET.SubElement(d, "remarks", source=f"BAO.F.ATAK.{sender_uid}", to=room_id,
                             time=ev.get("time"))
@@ -449,6 +457,35 @@ class Bridge:
         log.debug("server -> LAN: %s %s", cot_type, uid)
         if is_chat:
             self._chat_to_mesh(ev)
+            self._fanout_room(raw)
+
+    def _fanout_room(self, raw):
+        """TAK clients address a room reply only to the members they know (WinTAK: just MESH-GW),
+        so pass room messages on to every other TAK member via <marti><dest>."""
+        if self.mesh_room_id == ALL_CHAT:
+            return
+        ev = ET.fromstring(raw)
+        chat = ev.find("detail/__chat")
+        if chat is None or chat.get("id") != self.mesh_room_id:
+            return
+        d = detail_of(ev)
+        marti = d.find("marti")
+        already = {x.get("callsign") for x in marti.findall("dest")} if marti is not None else set()
+        grp = chat.find("chatgrp")
+        sender = grp.get("uid0") if grp is not None else None
+        targets = [cs for u, cs in self.tak_users.items() if u != sender and cs not in already]
+        if not targets:
+            return
+        for el in (marti, d.find("__serverdestination")):
+            if el is not None:
+                d.remove(el)
+        marti = ET.SubElement(d, "marti")
+        for cs in targets:
+            ET.SubElement(marti, "dest", callsign=cs)
+        self._tag(ev)
+        self._enqueue_server(ev)
+        self.stats["room_fanout"] += 1
+        log.info("room message from %s passed on to %s", chat.get("senderCallsign"), ", ".join(targets))
 
     # ---- Meshtastic
 
@@ -494,7 +531,10 @@ class Bridge:
         if self.mesh_room_id == ALL_CHAT:
             return geochat_event(uid, name, text)
         return geochat_event(uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
-                             members=[self.uid, *sorted(self.tak_users)])
+                             members=[self.uid, *sorted(self.tak_users)], names=self._room_names())
+
+    def _room_names(self):
+        return {self.uid: self.callsign, **self.tak_users}
 
     def _mesh_marker(self, node_id, pos, heard, packet=None):
         """A mesh node as a map marker (not a TAK contact: no endpoint, no team).
@@ -650,7 +690,7 @@ class Bridge:
             self.tak_users.setdefault(sender_uid, callsign)
             ev = geochat_event(self.uid, self.callsign, f"room test for {callsign} ({len(self.tak_users)} TAK members)",
                                room_id=self.mesh_room_id, room_name=self.mesh_room_name,
-                               members=sorted(self.tak_users))
+                               members=sorted(self.tak_users), names=self._room_names())
             self._tag(ev)
             self._enqueue_server(ev)
             self.reply(sender_uid, callsign, f"posted a test message to {self.mesh_room_name!r}, "

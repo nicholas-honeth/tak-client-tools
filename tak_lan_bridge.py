@@ -324,7 +324,9 @@ class Bridge:
         self.mesh_channel = int(m.get("channel_index", 0))
         room = m.get("chatroom", ALL_CHAT)
         self.mesh_room_name = room
-        self.mesh_room_id = room if room == ALL_CHAT else m.get("chatroom_id", f"MESHTASTIC-{room}")
+        # ATAK's own groups use UUIDs as ids; derive a stable one from bridge name + room name
+        self.mesh_room_id = room if room == ALL_CHAT else m.get(
+            "chatroom_id", str(uuid.uuid5(uuid.NAMESPACE_URL, f"tak-lan-bridge/{self.name}/{room}")))
         self.mesh_max_age = timedelta(minutes=float(m.get("marker_max_age_minutes", 180)))
         # "dot": ATAK spot-map marker (small coloured dot, own "Spot Map" overlay group);
         # "symbol": a 2525 symbol of cot_type (e.g. the neutral green square a-n-G)
@@ -530,8 +532,10 @@ class Bridge:
         name = self.mesh.node_name(node_id)
         if self.mesh_room_id == ALL_CHAT:
             return geochat_event(uid, name, text)
-        return geochat_event(uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
-                             members=[self.uid, *sorted(self.tak_users)], names=self._room_names())
+        # Sent *by the bridge contact* with the node's name as senderCallsign: every chatgrp member
+        # must be a reachable TAK contact, or ATAK cannot send replies to the group.
+        return geochat_event(self.uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
+                             members=sorted(self.tak_users), names=self._room_names())
 
     def _room_names(self):
         return {self.uid: self.callsign, **self.tak_users}

@@ -537,8 +537,12 @@ class Bridge:
         name = self.mesh.node_name(node_id)
         if self.mesh_room_id == ALL_CHAT:
             return geochat_event(uid, name, text)
-        # Sent *by the bridge contact* with the node's name as senderCallsign: every chatgrp member
-        # must be a reachable TAK contact, or ATAK cannot send replies to the group.
+        # Sent *by the bridge contact*: every chatgrp member must be a reachable TAK contact, or ATAK
+        # cannot send replies to the group. ATAK then shows MESH-GW as the author, so the node's
+        # name and short name (usable for "@SHRT text" replies) go into the text.
+        short = (self.mesh.node(node_id).get("user") or {}).get("shortName")
+        label = f"{name} ({short})" if short and short != name else name
+        text = f"[{label}] {text}"
         return geochat_event(self.uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
                              members=sorted(self.tak_users), names=self._room_names())
 
@@ -628,14 +632,23 @@ class Bridge:
         link = ev.find("detail/link")
         if link is not None and link.get("uid", "").startswith("MESHTASTIC-"):
             return
+        body = (remarks.text or "").strip()
+        if body.startswith("@"):
+            # "@<node> text" in the room: a Meshtastic DM to that node instead of the public channel.
+            # Status and the node's DM replies come back privately from the bridge contact.
+            grp = chat.find("chatgrp")
+            sender = (grp.get("uid0") if grp is not None else None) or (link.get("uid") if link is not None else "?")
+            self.stats["room_mention_dm"] += 1
+            self._dm_to_mesh(sender, chat.get("senderCallsign", sender), body[1:])
+            return
         now = time.monotonic()
         if now - self.mesh.last_send < float(self.mesh_cfg.get("chat_min_interval_seconds", 15)):
             self.stats["mesh_chat_rate_limited"] += 1
             log.info("mesh chat rate-limited, dropped: %s", remarks.text)
             return
         self.mesh.last_send = now
-        text = f"{chat.get('senderCallsign', '?')}: {remarks.text or ''}"[:200]
-        asyncio.get_running_loop().create_task(self.mesh.send_text(text))
+        text = f"{chat.get('senderCallsign', '?')}: {body}"[:200]
+        asyncio.get_running_loop().create_task(self.mesh.send_text(text, self.mesh_channel))
         self.stats["chat_to_mesh"] += 1
         log.info("chat -> mesh channel %d: %s", self.mesh_channel, text)
 

@@ -10,6 +10,7 @@ role = "HQ"
 dedupe_seconds = 30                # drop the same (uid, time, type) seen again within this window
 sa_interval_seconds = 60           # own SA + takPing to the server
 stats_interval_seconds = 300
+# loopback_log = "/var/log/tak-lan-bridge/loopback.log"   # DMs to the bridge contact (also in the main log)
 
 [lan]
 enabled = true                     # false: Meshtastic gateway only (no multicast), e.g. a laptop behind NAT

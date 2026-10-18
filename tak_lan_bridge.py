@@ -7,6 +7,8 @@ Server side: one streaming connection (TLS with a client cert, or plain TCP) car
 Optional:    a Meshtastic node on USB serial or TCP. Mesh nodes with a position become map
              markers (refreshed from the node database), broadcast texts on one channel go to a
              GeoChat room, and messages posted in that room are sent to the mesh.
+             Direct messages to the bridge contact are a loopback/debug channel: they are logged and
+             echoed, and "@<node> text" sends a Meshtastic direct message (replies come back there).
              The LAN side can be switched off ([lan] enabled = false) to run as a pure
              Meshtastic gateway, e.g. on a laptop behind NAT.
 
@@ -30,7 +32,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 log = logging.getLogger("tak-lan-bridge")
 
 MESH_HEADER = b"\xbf\x01\xbf"
@@ -229,8 +231,26 @@ class MeshtasticLink:
     def nodes(self):
         return list((self.iface.nodes or {}).items())
 
-    async def send_text(self, text):
-        await self.loop.run_in_executor(None, self.iface.sendText, text)
+    async def send_text(self, text, channel=0):
+        await self.loop.run_in_executor(None, lambda: self.iface.sendText(text, channelIndex=channel))
+
+    async def send_dm(self, text, dest_num):
+        """Direct message with wantAck. Returns the packet id; the ack/nak arrives as a
+        ROUTING_APP packet with decoded.requestId == that id."""
+        pkt = await self.loop.run_in_executor(
+            None, lambda: self.iface.sendText(text, destinationId=dest_num, wantAck=True))
+        return pkt.id
+
+    def find_nodes(self, query):
+        """Match "!a1b2c3d4" / "a1b2c3d4", a short name or a long name (case-insensitive)."""
+        q = query.strip().lower()
+        hits = []
+        for node_id, node in self.nodes():
+            user = node.get("user") or {}
+            if q in (node_id.lower(), node_id.lstrip("!").lower(),
+                     (user.get("shortName") or "").lower(), (user.get("longName") or "").lower()):
+                hits.append((node_id, node))
+        return hits
 
     def close(self):
         try:
@@ -270,6 +290,16 @@ class Bridge:
         self.mesh_room_name = room
         self.mesh_room_id = room if room == ALL_CHAT else m.get("chatroom_id", f"MESHTASTIC-{room}")
         self.mesh_max_age = timedelta(minutes=float(m.get("marker_max_age_minutes", 180)))
+        self.callsign = b.get("callsign", self.uid)
+        self.pending_dm = {}     # mesh packet id -> (atak uid, atak callsign, node_id, sent monotonic)
+        self.dm_peer = {}        # mesh node_id -> (atak uid, atak callsign) that last wrote to it
+        self.last_loopback = None
+        self.loop_log = None
+        if b.get("loopback_log"):
+            self.loop_log = logging.getLogger("tak-lan-bridge.loopback")
+            h = logging.FileHandler(b["loopback_log"])
+            h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            self.loop_log.addHandler(h)
         self.to_server = asyncio.Queue(maxsize=int(srv.get("queue_size", 1000)))
         self.seen = {}
         self.last_down = {}
@@ -366,6 +396,9 @@ class Bridge:
                 self.stats["server_rate_limited"] += 1
                 return
             self.last_down[uid] = now
+        if is_chat and self._is_dm_to_us(ev):
+            self.on_loopback(ev)
+            return
         self._tag(ev)
         self._send_lan(ev)
         log.debug("server -> LAN: %s %s", cot_type, uid)
@@ -377,9 +410,15 @@ class Bridge:
     def on_mesh_packet(self, packet):
         dec = packet.get("decoded") or {}
         port = dec.get("portnum")
-        if self.mesh is None or packet.get("from") == self.mesh.my_num:
+        if self.mesh is None:
+            return
+        if port == "ROUTING_APP":
+            return self._on_routing(packet)
+        if packet.get("from") == self.mesh.my_num:
             return
         node_id = packet.get("fromId") or f"!{packet.get('from', 0):08x}"
+        if port == "TEXT_MESSAGE_APP" and packet.get("to") == self.mesh.my_num:
+            return self._mesh_dm_in(node_id, dec.get("text", ""))
         if port == "POSITION_APP":
             self.stats["mesh_position_rx"] += 1
             ev = self._mesh_marker(node_id, dec.get("position") or {}, utcnow(), packet)
@@ -447,6 +486,7 @@ class Bridge:
             bits.append("powered" if batt > 100 else f"battery {batt}%")
         bits.append("heard " + heard.astimezone().strftime("%Y-%m-%d %H:%M"))
         bits.append(f"via {self.name}")
+        bits.append(f"DM: '@{node_id} text' to {self.callsign}")
         ET.SubElement(d, "remarks").text = ", ".join(bits)
         ET.SubElement(d, "precisionlocation", geopointsrc="GPS", altsrc="GPS")
         return ev
@@ -493,6 +533,140 @@ class Bridge:
         asyncio.get_running_loop().create_task(self.mesh.send_text(text))
         self.stats["chat_to_mesh"] += 1
         log.info("chat -> mesh channel %d: %s", self.mesh_channel, text)
+
+    # ---- loopback / direct messages via the bridge contact
+
+    def _is_dm_to_us(self, ev):
+        chat = ev.find("detail/__chat")
+        return chat is not None and chat.get("id") == self.uid
+
+    def dm_event(self, to_uid, to_callsign, text):
+        """Direct GeoChat from the bridge contact to one TAK user (routed by <marti><dest>)."""
+        b = self.cfg["bridge"]
+        msg_id = str(uuid.uuid4())
+        ev = new_event(f"GeoChat.{self.uid}.{to_uid}.{msg_id}", "b-t-f", "h-g-i-g-o",
+                       float(b.get("lat", 0)), float(b.get("lon", 0)), timedelta(days=1))
+        d = detail_of(ev)
+        chat = ET.SubElement(d, "__chat", parent="RootContactGroup", groupOwner="false",
+                             messageId=msg_id, chatroom=to_callsign, id=to_uid,
+                             senderCallsign=self.callsign)
+        ET.SubElement(chat, "chatgrp", uid0=self.uid, uid1=to_uid, id=to_uid)
+        ET.SubElement(d, "link", uid=self.uid, type=b.get("cot_type", "a-f-G-E-S"), relation="p-p")
+        remarks = ET.SubElement(d, "remarks", source=f"BAO.F.ATAK.{self.uid}", to=to_uid,
+                                time=ev.get("time"))
+        remarks.text = text
+        marti = ET.SubElement(d, "marti")
+        ET.SubElement(marti, "dest", callsign=to_callsign)
+        return ev
+
+    def reply(self, to_uid, to_callsign, text):
+        self._loop_log("TX", to_callsign, text)
+        ev = self.dm_event(to_uid, to_callsign, text)
+        self._tag(ev)
+        self._enqueue_server(ev)
+
+    def _loop_log(self, direction, who, text):
+        line = f"LOOPBACK {direction} {who}: {text}"
+        log.info(line)
+        if self.loop_log:
+            self.loop_log.info(line)
+
+    def on_loopback(self, ev):
+        chat = ev.find("detail/__chat")
+        grp = chat.find("chatgrp")
+        sender_uid = grp.get("uid0") if grp is not None else None
+        link = ev.find("detail/link")
+        sender_uid = sender_uid or (link.get("uid") if link is not None else "?")
+        callsign = chat.get("senderCallsign", sender_uid)
+        text = (ev.findtext("detail/remarks") or "").strip()
+        self.stats["loopback_rx"] += 1
+        self.last_loopback = (sender_uid, callsign)
+        self._loop_log("RX", f"{callsign} ({sender_uid})", text)
+        sent = parse_cot_time(ev.get("time"))
+        lag = f"{(utcnow() - sent).total_seconds():.1f} s" if sent else "?"
+        if text.lower() in ("help", "?"):
+            self.reply(sender_uid, callsign,
+                       "MESH-GW loopback. Anything: echoed. '@<node> text': Meshtastic DM to a node "
+                       "(!id, short or long name; quote names with spaces: @\"Long Name\" hi). "
+                       "'stats': bridge counters. Mesh replies to DMs arrive here.")
+        elif text.lower() == "stats":
+            self.reply(sender_uid, callsign, ", ".join(f"{k}={v}" for k, v in sorted(self.stats.items())))
+        elif text.startswith("@"):
+            self._dm_to_mesh(sender_uid, callsign, text[1:])
+        else:
+            self.reply(sender_uid, callsign, f"echo: {text!r} (ATAK -> server -> bridge {lag})")
+
+    def _dm_to_mesh(self, sender_uid, callsign, rest):
+        if rest.startswith('"') and '"' in rest[1:]:
+            target, _, body = rest[1:].partition('"')
+        else:
+            target, _, body = rest.partition(" ")
+        body = body.strip()
+        if self.mesh is None:
+            return self.reply(sender_uid, callsign, "no Meshtastic node connected")
+        if not target or not body:
+            return self.reply(sender_uid, callsign, "usage: @<node> message")
+        hits = self.mesh.find_nodes(target)
+        if not hits:
+            return self.reply(sender_uid, callsign, f"no node matches {target!r}")
+        if len(hits) > 1:
+            names = "; ".join(f"{i} {(n.get('user') or {}).get('longName', '')}" for i, n in hits[:6])
+            return self.reply(sender_uid, callsign, f"{len(hits)} nodes match {target!r}: {names}. Use the !id")
+        node_id, node = hits[0]
+        now = time.monotonic()
+        if now - self.mesh.last_send < float(self.mesh_cfg.get("chat_min_interval_seconds", 15)):
+            self.stats["mesh_dm_rate_limited"] += 1
+            return self.reply(sender_uid, callsign, "rate-limited (duty cycle), try again in a few seconds")
+        self.mesh.last_send = now
+        text = f"{callsign}: {body}"[:200]
+        name = self.mesh.node_name(node_id)
+        self.dm_peer[node_id] = (sender_uid, callsign)
+
+        async def go():
+            try:
+                pid = await self.mesh.send_dm(text, node["num"])
+            except Exception as e:  # interface down, bad node num, ...
+                self.reply(sender_uid, callsign, f"send to {name} failed: {e}")
+                return
+            self.pending_dm[pid] = (sender_uid, callsign, node_id, time.monotonic())
+            self.stats["mesh_dm_tx"] += 1
+            self.reply(sender_uid, callsign, f"-> {name} ({node_id}): sent, waiting for ack")
+        asyncio.get_running_loop().create_task(go())
+
+    def _on_routing(self, packet):
+        """Ack/nak for a DM we sent. An ack from the destination = delivered; an ack from our own
+        node only means a neighbour rebroadcast it (implicit ack)."""
+        dec = packet.get("decoded") or {}
+        pend = self.pending_dm.get(dec.get("requestId"))
+        if pend is None:
+            return
+        sender_uid, callsign, node_id, t0 = pend
+        reason = (dec.get("routing") or {}).get("errorReason", "NONE")
+        name = self.mesh.node_name(node_id)
+        dt = time.monotonic() - t0
+        from_id = packet.get("fromId") or f"!{packet.get('from', 0):08x}"
+        if reason != "NONE":
+            del self.pending_dm[dec["requestId"]]
+            self.stats["mesh_dm_nak"] += 1
+            self.reply(sender_uid, callsign, f"-> {name}: FAILED {reason} after {dt:.0f} s")
+        elif from_id == node_id:
+            del self.pending_dm[dec["requestId"]]
+            self.stats["mesh_dm_ack"] += 1
+            self.reply(sender_uid, callsign, f"-> {name}: delivered (ack after {dt:.0f} s)")
+        else:
+            self.reply(sender_uid, callsign, f"-> {name}: relayed by {from_id} after {dt:.0f} s, "
+                                             "no end-to-end ack yet")
+
+    def _mesh_dm_in(self, node_id, text):
+        """A Meshtastic DM to our node: to whoever last wrote to that node, else the last
+        loopback user."""
+        peer = self.dm_peer.get(node_id) or self.last_loopback
+        name = self.mesh.node_name(node_id)
+        self.stats["mesh_dm_rx"] += 1
+        if peer is None:
+            log.info("mesh DM from %s (%s) with no TAK peer yet: %s", name, node_id, text)
+            return
+        self.reply(peer[0], peer[1], f"[{name} {node_id}] {text}")
 
     # ---- own presence
 

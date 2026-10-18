@@ -156,6 +156,19 @@ async def main(tmp):
           any(e.findtext("detail/remarks") == "hello from server" for e in chat_col.events))
     check("no echo of server traffic back to server",
           server.uids().count("ANDROID-remote") == 0)
+    # 5. Loopback: a DM to the bridge contact is echoed back to the sender, not sent to the LAN.
+    dm = tlb.geochat_event("ANDROID-remote", "REMOTE", "loop test", room_id=bridge.uid,
+                           room_name="test", members=[bridge.uid])
+    n_lan = len(chat_col.events)
+    server.send(dm)
+    await server.writer.drain()
+    await asyncio.sleep(1.0)
+    echo = [e for e in server.received if e.get("type") == "b-t-f"
+            and e.find("detail/__chat").get("id") == "ANDROID-remote"]
+    check("loopback DM echoed to sender",
+          bool(echo) and "loop test" in (echo[-1].findtext("detail/remarks") or "")
+          and echo[-1].find("detail/marti/dest").get("callsign") == "REMOTE")
+    check("loopback DM not sent to LAN", len(chat_col.events) == n_lan)
     print("bridge stats:", dict(sorted(bridge.stats.items())))
 
     task.cancel()

@@ -447,6 +447,7 @@ class Bridge:
         port = dec.get("portnum")
         if self.mesh is None:
             return
+        self.stats[f"mesh_rx_{port or 'ENCRYPTED'}"] += 1   # what the node passes us, by port
         if port == "ROUTING_APP":
             return self._on_routing(packet)
         if packet.get("from") == self.mesh.my_num:

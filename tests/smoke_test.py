@@ -189,7 +189,9 @@ async def main(tmp):
     await server.writer.drain()
     await asyncio.sleep(1.0)
     replies = [e for e in server.received[n_srv:] if e.get("type") == "b-t-f"]
-    check("reply circuit breaker caps replies at 5", len(replies) == 5)
+    check("reply circuit breaker caps replies at 8", len(replies) == 8)
+    check("chunk_text keeps OTS's 255-char limit",
+          all(len(c) <= tlb.MAX_CHAT for c in tlb.chunk_text("word " * 300 + "\n" + "x" * 600)))
     print("bridge stats:", dict(sorted(bridge.stats.items())))
 
     task.cancel()

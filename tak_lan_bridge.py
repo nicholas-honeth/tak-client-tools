@@ -57,6 +57,35 @@ ROLE_TYPES = {
     "TAK_TRACKER": "a-n-G-U-C-I",
 }
 SIOCGIFADDR = 0x8915
+# OTS stores GeoChat text in geochat.remarks varchar(255) before routing it; a longer message fails
+# to parse and is never delivered. Keep every chat message we send under this.
+MAX_CHAT = 250
+
+
+def chunk_text(text, limit=MAX_CHAT):
+    """Split text into pieces of at most `limit` chars, preferring line then word boundaries."""
+    out, cur = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            cut = line.rfind(" ", 0, limit)
+            cut = cut if cut > 0 else limit
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:cut])
+            line = line[cut:].lstrip()
+        if cur and len(cur) + 1 + len(line) > limit:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        out.append(cur)
+    return out
+
+
+def clip(text, limit=MAX_CHAT):
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 # ---------------------------------------------------------------- helpers
@@ -549,7 +578,7 @@ class Bridge:
         # name and short name (usable for "@SHRT text" replies) go into the text.
         short = (self.mesh.node(node_id).get("user") or {}).get("shortName")
         label = f"{name} ({short})" if short and short != name else name
-        text = f"[{label}] {text}"
+        text = clip(f"[{label}] {text}")
         return geochat_event(self.uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
                              members=sorted(self.tak_users), names=self._room_names())
 
@@ -687,12 +716,17 @@ class Bridge:
         return ev
 
     def reply(self, to_uid, to_callsign, text):
-        # Circuit breaker: at most 5 replies per recipient per 10 s, whatever the cause.
+        for part in chunk_text(text):
+            self._reply_one(to_uid, to_callsign, part)
+
+    def _reply_one(self, to_uid, to_callsign, text):
+        # Circuit breaker: at most 8 messages per recipient per 10 s, whatever the cause
+        # (a long reply such as 'help' is split into a few messages).
         now = time.monotonic()
         recent = [t for t in self.reply_times.get(to_uid, []) if now - t < 10]
-        if len(recent) >= 5:
+        if len(recent) >= 8:
             self.stats["reply_suppressed"] += 1
-            if len(recent) == 5:
+            if len(recent) == 8:
                 log.warning("reply rate limit hit for %s, suppressing replies for a few seconds", to_callsign)
             recent.append(now)
             self.reply_times[to_uid] = recent

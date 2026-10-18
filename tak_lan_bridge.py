@@ -38,6 +38,24 @@ log = logging.getLogger("tak-lan-bridge")
 MESH_HEADER = b"\xbf\x01\xbf"
 SERVER_ENDPOINT = "*:-1:stcp"  # how a server-connected ATAK advertises itself
 ALL_CHAT = "All Chat Rooms"
+
+# Meshtastic device role -> CoT type (MIL-STD-2525 via ATAK). Neutral: public nodes are not our units.
+# Override per role in [meshtastic.role_types]; roles not listed use cot_type.
+ROLE_TYPES = {
+    "CLIENT": "a-n-G-U-U-S-R",          # signal unit, radio
+    "CLIENT_MUTE": "a-n-G-U-U-S-R",
+    "CLIENT_HIDDEN": "a-n-G-U-U-S-R",
+    "CLIENT_BASE": "a-n-G-U-U-S-R",
+    "ROUTER": "a-n-G-U-U-S-R-W",        # signal unit, radio relay
+    "ROUTER_LATE": "a-n-G-U-U-S-R-W",
+    "ROUTER_CLIENT": "a-n-G-U-U-S-R-W",
+    "REPEATER": "a-n-G-U-U-S-R-W",
+    "SENSOR": "a-n-G-E-S",              # ground equipment, sensor
+    "TRACKER": "a-n-G-E",               # ground equipment
+    "LOST_AND_FOUND": "a-n-G-E",
+    "TAK": "a-n-G-U-C-I",               # infantry: a person with ATAK + the Meshtastic plugin
+    "TAK_TRACKER": "a-n-G-U-C-I",
+}
 SIOCGIFADDR = 0x8915
 
 
@@ -301,6 +319,11 @@ class Bridge:
         # "symbol": a 2525 symbol of cot_type (e.g. the neutral green square a-n-G)
         self.mesh_style = m.get("marker_style", "symbol")
         self.mesh_dot_argb = argb_int(m.get("dot_color", "#67EA94"))   # Meshtastic green
+        self.role_types = {**ROLE_TYPES, **m.get("role_types", {})}
+        if "relay_cot_type" in m:   # v0.3 config key
+            for r, t in ROLE_TYPES.items():
+                if t == "a-n-G-U-U-S-R-W" and r not in m.get("role_types", {}):
+                    self.role_types[r] = m["relay_cot_type"]
         self.callsign = b.get("callsign", self.uid)
         self.pending_dm = {}     # mesh packet id -> (atak uid, atak callsign, node_id, sent monotonic)
         self.dm_peer = {}        # mesh node_id -> (atak uid, atak callsign) that last wrote to it
@@ -479,10 +502,8 @@ class Bridge:
         role = str(user.get("role", "CLIENT"))
         if dot:
             cot_type = "b-m-p-s-m"
-        elif "ROUTER" in role or "REPEATER" in role:
-            cot_type = self.mesh_cfg.get("relay_cot_type", "a-n-G-U-U-S-R-W")   # 2525 signal: radio relay
         else:
-            cot_type = self.mesh_cfg.get("cot_type", "a-n-G-U-U-S-R")           # 2525 signal: radio
+            cot_type = self.role_types.get(role) or self.mesh_cfg.get("cot_type", "a-n-G-U-U-S-R")
         ev = new_event(uid, cot_type, "m-g", lat, lon, stale, hae=pos.get("altitude", 9999999.0))
         ev.set("start", cot_time(heard))
         d = detail_of(ev)
@@ -495,7 +516,7 @@ class Bridge:
             bits.append(f"short {user['shortName']}")
         if user.get("hwModel"):
             bits.append(str(user["hwModel"]))
-        bits.append(f"role {role}")
+        bits.append("LOST AND FOUND" if role == "LOST_AND_FOUND" else f"role {role}")
         hops = node.get("hopsAway")
         if packet and packet.get("hopStart") is not None and packet.get("hopLimit") is not None:
             hops = packet["hopStart"] - packet["hopLimit"]
@@ -519,7 +540,7 @@ class Bridge:
         Fills the map at start-up and keeps markers alive between (infrequent) position packets."""
         interval = float(self.mesh_cfg.get("sweep_interval_seconds", 300))
         while True:
-            n = 0
+            n, roles = 0, collections.Counter()
             for node_id, node in self.mesh.nodes():
                 last = node.get("lastHeard") or (node.get("position") or {}).get("time")
                 if not last:
@@ -529,8 +550,9 @@ class Bridge:
                 if ev is not None:
                     self._forward_mesh(ev)
                     n += 1
+                    roles[str((node.get("user") or {}).get("role", "CLIENT"))] += 1
             self.stats["mesh_sweep_markers"] = n
-            log.info("mesh sweep: %d node markers published", n)
+            log.info("mesh sweep: %d node markers published, roles %s", n, dict(roles.most_common()))
             await asyncio.sleep(interval)
 
     def _chat_to_mesh(self, ev):
@@ -699,7 +721,8 @@ class Bridge:
                        float(b.get("lat", 0)), float(b.get("lon", 0)), timedelta(minutes=3))
         d = detail_of(ev)
         ET.SubElement(d, "contact", callsign=b.get("callsign", self.uid), endpoint=SERVER_ENDPOINT)
-        ET.SubElement(d, "__group", name=b.get("team", "Cyan"), role=b.get("role", "HQ"))
+        if b.get("team", "Cyan"):   # team members are drawn as team dots; "" shows the 2525 symbol
+            ET.SubElement(d, "__group", name=b.get("team", "Cyan"), role=b.get("role", "HQ"))
         ET.SubElement(d, "takv", device=socket.gethostname(), platform="tak-lan-bridge",
                       os="Linux", version=__version__)
         ET.SubElement(d, "remarks").text = f"LAN bridge {self.lan_ip or 'no LAN'}: " + ", ".join(

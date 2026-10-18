@@ -5,8 +5,9 @@ name = "home"                      # site id: used in the bridge uid (LANBRIDGE-
 callsign = "LAN-BRIDGE-HOME"
 lat = 59.3470                      # where the bridge marker is shown
 lon = 18.0730
-team = "Cyan"
+team = "Cyan"                      # "" = no team: drawn as the 2525 symbol of cot_type
 role = "HQ"
+# cot_type = "a-f-G-U-U-S-R-W"      # e.g. friendly radio relay (with team = "")
 dedupe_seconds = 30                # drop the same (uid, time, type) seen again within this window
 sa_interval_seconds = 60           # own SA + takPing to the server
 stats_interval_seconds = 300
@@ -52,7 +53,10 @@ chatroom = "Meshtastic MediumFast" # GeoChat room for that channel; "All Chat Ro
 marker_style = "symbol"            # "dot": small spot-map dot (own Overlay Manager group); "symbol": 2525 symbol of cot_type
 dot_color = "#67EA94"              # dot colour (#RRGGBB or #AARRGGBB)
 cot_type = "a-n-G-U-U-S-R"         # 2525 neutral signal unit, radio (public nodes are not our units)
-relay_cot_type = "a-n-G-U-U-S-R-W" # nodes with a ROUTER/REPEATER role: radio relay
+# Per-role symbols: defaults in ROLE_TYPES (radio, radio relay for routers, sensor, equipment for
+# trackers, infantry for TAK roles). Override here:
+# [meshtastic.role_types]
+# TRACKER = "a-n-G-E-V"
 marker_max_age_minutes = 180       # marker stale = last heard + this
 sweep_interval_seconds = 300       # republish all recently heard nodes from the node database
 chat_to_mesh = true                # messages posted in the room -> mesh broadcast on channel_index

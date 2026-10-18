@@ -342,6 +342,7 @@ class Bridge:
         self.dm_peer = {}        # mesh node_id -> (atak uid, atak callsign) that last wrote to it
         self.last_loopback = None
         self.tak_users = {}      # TAK contacts seen via the server: uid -> callsign (room members)
+        self.reply_times = {}    # uid -> monotonic times of recent bridge replies (circuit breaker)
         self.loop_log = None
         if b.get("loopback_log"):
             self.loop_log = logging.getLogger("tak-lan-bridge.loopback")
@@ -444,7 +445,13 @@ class Bridge:
                 or self._is_dup(ev)):
             self.stats["server_dropped"] += 1
             return
-        is_chat = cot_type.startswith("b-t-f")
+        # Exactly b-t-f: b-t-f-d / b-t-f-r / b-t-f-p are delivered/read/pending receipts. WinTAK sends
+        # them with a plain __chat and no text; treating them as chat made the loopback echo every
+        # receipt, which WinTAK acknowledged with another receipt (a 400-message loop).
+        if cot_type.startswith("b-t-f-"):
+            self.stats["server_chat_receipt"] += 1
+            return
+        is_chat = cot_type == "b-t-f"
         if not is_chat:
             now = time.monotonic()
             if now - self.last_down.get(uid, -1e9) < self.min_interval:
@@ -680,6 +687,18 @@ class Bridge:
         return ev
 
     def reply(self, to_uid, to_callsign, text):
+        # Circuit breaker: at most 5 replies per recipient per 10 s, whatever the cause.
+        now = time.monotonic()
+        recent = [t for t in self.reply_times.get(to_uid, []) if now - t < 10]
+        if len(recent) >= 5:
+            self.stats["reply_suppressed"] += 1
+            if len(recent) == 5:
+                log.warning("reply rate limit hit for %s, suppressing replies for a few seconds", to_callsign)
+            recent.append(now)
+            self.reply_times[to_uid] = recent
+            return
+        recent.append(now)
+        self.reply_times[to_uid] = recent
         self._loop_log("TX", to_callsign, text)
         ev = self.dm_event(to_uid, to_callsign, text)
         self._tag(ev)
@@ -699,6 +718,9 @@ class Bridge:
         sender_uid = sender_uid or (link.get("uid") if link is not None else "?")
         callsign = chat.get("senderCallsign", sender_uid)
         text = (ev.findtext("detail/remarks") or "").strip()
+        if not text:   # never answer an empty message (receipts, client quirks): no reply loops
+            self.stats["loopback_empty"] += 1
+            return
         self.stats["loopback_rx"] += 1
         self.last_loopback = (sender_uid, callsign)
         self._loop_log("RX", f"{callsign} ({sender_uid})", text)

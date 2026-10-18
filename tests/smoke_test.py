@@ -169,6 +169,27 @@ async def main(tmp):
           bool(echo) and "loop test" in (echo[-1].findtext("detail/remarks") or "")
           and echo[-1].find("detail/marti/dest").get("uid") == "ANDROID-remote")
     check("loopback DM not sent to LAN", len(chat_col.events) == n_lan)
+
+    # 6. WinTAK-style receipt (b-t-f-d, plain __chat, no text) and an empty DM: no reply, no loop.
+    n_srv = len(server.received)
+    for t in ("b-t-f-d", "b-t-f-r", "b-t-f"):
+        r = tlb.geochat_event("ANDROID-remote", "REMOTE", "", room_id=bridge.uid, room_name="test",
+                              members=[bridge.uid])
+        r.set("type", t)
+        server.send(r)
+    await server.writer.drain()
+    await asyncio.sleep(1.0)
+    replies = [e for e in server.received[n_srv:] if e.get("type") == "b-t-f"]
+    check("receipts and empty DMs are not answered", not replies)
+    # 7. Circuit breaker: 10 quick DMs -> at most 5 replies
+    n_srv = len(server.received)
+    for i in range(10):
+        server.send(tlb.geochat_event("ANDROID-flood", "FLOOD", f"x{i}", room_id=bridge.uid,
+                                      room_name="test", members=[bridge.uid]))
+    await server.writer.drain()
+    await asyncio.sleep(1.0)
+    replies = [e for e in server.received[n_srv:] if e.get("type") == "b-t-f"]
+    check("reply circuit breaker caps replies at 5", len(replies) == 5)
     print("bridge stats:", dict(sorted(bridge.stats.items())))
 
     task.cancel()

@@ -286,6 +286,16 @@ class MeshtasticLink:
     def _on_receive(self, packet, interface):
         self.loop.call_soon_threadsafe(self.bridge.on_mesh_packet, packet)
 
+    async def request_nodeinfo(self, dest_num):
+        """Ask a node for its NODEINFO (name, short name, hw): send ours with wantResponse, as the
+        Meshtastic apps do. The reply updates iface.nodes by itself."""
+        from google.protobuf.json_format import ParseDict
+        from meshtastic.protobuf import mesh_pb2, portnums_pb2
+        user = ParseDict(self.iface.getMyUser() or {}, mesh_pb2.User(), ignore_unknown_fields=True)
+        await self.loop.run_in_executor(None, lambda: self.iface.sendData(
+            user.SerializeToString(), destinationId=dest_num,
+            portNum=portnums_pb2.PortNum.NODEINFO_APP, wantResponse=True))
+
     def node(self, node_id):
         return (self.iface.nodes or {}).get(node_id) or {}
 
@@ -372,6 +382,7 @@ class Bridge:
         self.last_loopback = None
         self.tak_users = {}      # TAK contacts seen via the server: uid -> callsign (room members)
         self.reply_times = {}    # uid -> monotonic times of recent bridge replies (circuit breaker)
+        self.nodeinfo_asked, self.nodeinfo_last = {}, -1e9   # NODEINFO requests (rate limit)
         self.loop_log = None
         if b.get("loopback_log"):
             self.loop_log = logging.getLogger("tak-lan-bridge.loopback")
@@ -555,6 +566,7 @@ class Bridge:
             if int(packet.get("channel", 0)) != self.mesh_channel:
                 self.stats["mesh_chat_other_channel"] += 1
                 return
+            self._maybe_request_name(node_id, packet)
             ev = self._mesh_chat(node_id, dec.get("text", ""))
             self.stats["mesh_chat"] += 1
             log.info("mesh chat %s: %s", self.mesh.node_name(node_id), dec.get("text", ""))
@@ -568,6 +580,19 @@ class Bridge:
         if self.mesh_cfg.get("to_lan", True):
             self._send_lan(ev)
 
+    def _maybe_request_name(self, node_id, packet):
+        """Text from a node we have no name for: ask it for NODEINFO, at most once per node per
+        6 h and once per minute overall (airtime)."""
+        if (self.mesh.node(node_id).get("user") or {}).get("longName"):
+            return
+        now = time.monotonic()
+        if now - self.nodeinfo_asked.get(node_id, -1e9) < 6 * 3600 or now - self.nodeinfo_last < 60:
+            return
+        self.nodeinfo_asked[node_id] = self.nodeinfo_last = now
+        self.stats["mesh_nodeinfo_requested"] += 1
+        log.info("no name for %s yet, requesting its node info", node_id)
+        asyncio.get_running_loop().create_task(self.mesh.request_nodeinfo(packet.get("from")))
+
     def _mesh_chat(self, node_id, text):
         uid = f"MESHTASTIC-{node_id.lstrip('!')}"
         name = self.mesh.node_name(node_id)
@@ -577,7 +602,10 @@ class Bridge:
         # cannot send replies to the group. ATAK then shows MESH-GW as the author, so the node's
         # name and short name (usable for "@SHRT text" replies) go into the text.
         short = (self.mesh.node(node_id).get("user") or {}).get("shortName")
-        label = f"{name} ({short})" if short and short != name else name
+        if name == node_id:   # no NODEINFO yet: id only (a name request is on its way)
+            label = f"{node_id} (name unknown)"
+        else:
+            label = f"{name} ({short})" if short and short != name else name
         text = clip(f"[{label}] {text}")
         return geochat_event(self.uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
                              members=sorted(self.tak_users), names=self._room_names())

@@ -683,10 +683,12 @@ class Bridge:
             log.info("mesh chat rate-limited, dropped: %s", remarks.text)
             return
         self.mesh.last_send = now
-        text = f"{chat.get('senderCallsign', '?')}: {body}"[:200]
+        text = self._mesh_text(chat.get("senderCallsign", "?"), body)
         asyncio.get_running_loop().create_task(self.mesh.send_text(text, self.mesh_channel))
         self.stats["chat_to_mesh"] += 1
-        log.info("chat -> mesh channel %d: %s", self.mesh_channel, text)
+        log.info("chat -> mesh channel %d from %s: %s", self.mesh_channel, chat.get("senderCallsign", "?"), text)
+        if self.loop_log:
+            self.loop_log.info(f"MESH ch{self.mesh_channel} from {chat.get('senderCallsign', '?')}: {text}")
 
     # ---- loopback / direct messages via the bridge contact
 
@@ -765,7 +767,9 @@ class Bridge:
                 f"{self.callsign} = Meshtastic gateway (node {self.mesh.node_name(f'!{self.mesh.my_num:08x}') if self.mesh else 'not connected'}).",
                 f"ROOM '{self.mesh_room_name}' (mesh channel {self.mesh_channel}):",
                 "- Messages show the mesh sender as [Long name (SHORT)].",
-                "- Plain text is sent PUBLICLY on the channel as '<your callsign>: text'.",
+                "- Plain text is sent PUBLICLY on the channel, from the gateway node"
+                + (" as '<your callsign>: text'." if self.mesh_cfg.get("show_tak_callsign", False)
+                   else " (your TAK callsign is not shown on the mesh)."),
                 "- '@SHORT text' sends a private Meshtastic DM to that node instead.",
                 "  Also @!a1b2c3d4 or @\"Long Name\". Status and DM replies arrive here.",
                 f"THIS CHAT ({self.callsign}):",
@@ -792,6 +796,13 @@ class Bridge:
         else:
             self.reply(sender_uid, callsign, f"echo: {text!r} (ATAK -> server -> bridge {lag})")
 
+    def _mesh_text(self, callsign, body):
+        """Text as it goes out on the mesh. By default without the TAK callsign: Meshtastic users
+        only see the gateway node. The callsign stays in the bridge/loopback logs."""
+        if self.mesh_cfg.get("show_tak_callsign", False):
+            body = f"{callsign}: {body}"
+        return body[:200]
+
     def _dm_to_mesh(self, sender_uid, callsign, rest):
         if rest.startswith('"') and '"' in rest[1:]:
             target, _, body = rest[1:].partition('"')
@@ -814,7 +825,10 @@ class Bridge:
             self.stats["mesh_dm_rate_limited"] += 1
             return self.reply(sender_uid, callsign, "rate-limited (duty cycle), try again in a few seconds")
         self.mesh.last_send = now
-        text = f"{callsign}: {body}"[:200]
+        text = self._mesh_text(callsign, body)
+        log.info("DM -> mesh %s from %s: %s", node_id, callsign, text)
+        if self.loop_log:
+            self.loop_log.info(f"MESH DM {node_id} from {callsign}: {text}")
         name = self.mesh.node_name(node_id)
         self.dm_peer[node_id] = (sender_uid, callsign)
 

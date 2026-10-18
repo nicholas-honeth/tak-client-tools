@@ -61,6 +61,7 @@ marker_max_age_minutes = 180       # marker stale = last heard + this
 sweep_interval_seconds = 300       # republish all recently heard nodes from the node database
 chat_to_mesh = true                # messages posted in the room -> mesh broadcast on channel_index
 all_chat_to_mesh = false           # also forward All Chat Rooms
+show_tak_callsign = false          # prefix mesh texts with "<TAK callsign>: " (always logged either way)
 chat_from_lan = true
 chat_min_interval_seconds = 15     # EU868 duty cycle: keep mesh chat sparse
 to_lan = true                      # also show mesh nodes/chat on the LAN multicast

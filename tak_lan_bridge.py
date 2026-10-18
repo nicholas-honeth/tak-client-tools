@@ -472,22 +472,27 @@ class Bridge:
             return
         d = detail_of(ev)
         marti = d.find("marti")
-        already = {x.get("callsign") for x in marti.findall("dest")} if marti is not None else set()
+        already = set()
+        if marti is not None:
+            for x in marti.findall("dest"):
+                already.add(x.get("uid"))
+                already.update(u for u, cs in self.tak_users.items() if cs == x.get("callsign"))
         grp = chat.find("chatgrp")
         sender = grp.get("uid0") if grp is not None else None
-        targets = [cs for u, cs in self.tak_users.items() if u != sender and cs not in already]
+        targets = [u for u in self.tak_users if u != sender and u not in already]
         if not targets:
             return
         for el in (marti, d.find("__serverdestination")):
             if el is not None:
                 d.remove(el)
         marti = ET.SubElement(d, "marti")
-        for cs in targets:
-            ET.SubElement(marti, "dest", callsign=cs)
+        for u in targets:
+            ET.SubElement(marti, "dest", uid=u)   # by uid, see dm_event
         self._tag(ev)
         self._enqueue_server(ev)
         self.stats["room_fanout"] += 1
-        log.info("room message from %s passed on to %s", chat.get("senderCallsign"), ", ".join(targets))
+        log.info("room message from %s passed on to %s", chat.get("senderCallsign"),
+                 ", ".join(self.tak_users[u] for u in targets))
 
     # ---- Meshtastic
 
@@ -656,7 +661,9 @@ class Bridge:
                                 time=ev.get("time"))
         remarks.text = text
         marti = ET.SubElement(d, "marti")
-        ET.SubElement(marti, "dest", callsign=to_callsign)
+        # By uid: OTS binds the callsign route only at connect time, so a renamed client
+        # would miss callsign-addressed messages until it reconnects. The uid never changes.
+        ET.SubElement(marti, "dest", uid=to_uid)
         return ev
 
     def reply(self, to_uid, to_callsign, text):

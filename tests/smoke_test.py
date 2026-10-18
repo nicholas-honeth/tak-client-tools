@@ -167,7 +167,7 @@ async def main(tmp):
             and e.find("detail/__chat").get("id") == "ANDROID-remote"]
     check("loopback DM echoed to sender",
           bool(echo) and "loop test" in (echo[-1].findtext("detail/remarks") or "")
-          and echo[-1].find("detail/marti/dest").get("callsign") == "REMOTE")
+          and echo[-1].find("detail/marti/dest").get("uid") == "ANDROID-remote")
     check("loopback DM not sent to LAN", len(chat_col.events) == n_lan)
     print("bridge stats:", dict(sorted(bridge.stats.items())))
 

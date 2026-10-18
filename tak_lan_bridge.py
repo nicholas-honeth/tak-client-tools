@@ -636,23 +636,38 @@ class Bridge:
         return ev
 
     async def mesh_sweep_loop(self):
-        """Publish every node in the node database that has a position and was heard recently.
-        Fills the map at start-up and keeps markers alive between (infrequent) position packets."""
+        """Publish nodes from the node database that have a position and were heard recently.
+        Fills the map at start-up and keeps markers alive between (infrequent) position packets.
+        Paced (sweep_rate per second) and incremental: only nodes heard since the last sweep, with
+        a full sweep every full_sweep_every rounds. A burst of ~130 events every 5 min coincided
+        with OTS missing its RabbitMQ heartbeat for this connection (~13 min after connect)."""
         interval = float(self.mesh_cfg.get("sweep_interval_seconds", 300))
+        rate = float(self.mesh_cfg.get("sweep_rate", 10))
+        full_every = int(self.mesh_cfg.get("full_sweep_every", 6))
+        sent_heard = {}    # node_id -> lastHeard we last published
+        rnd = 0
         while True:
-            n, roles = 0, collections.Counter()
+            full = rnd % full_every == 0
+            n, skipped, roles = 0, 0, collections.Counter()
             for node_id, node in self.mesh.nodes():
                 last = node.get("lastHeard") or (node.get("position") or {}).get("time")
                 if not last:
+                    continue
+                if not full and sent_heard.get(node_id) == last:
+                    skipped += 1
                     continue
                 heard = datetime.fromtimestamp(last, timezone.utc)
                 ev = self._mesh_marker(node_id, node.get("position") or {}, heard)
                 if ev is not None:
                     self._forward_mesh(ev)
+                    sent_heard[node_id] = last
                     n += 1
                     roles[str((node.get("user") or {}).get("role", "CLIENT"))] += 1
+                    await asyncio.sleep(1 / rate)
             self.stats["mesh_sweep_markers"] = n
-            log.info("mesh sweep: %d node markers published, roles %s", n, dict(roles.most_common()))
+            log.info("mesh sweep (%s): %d node markers published, %d unchanged, roles %s",
+                     "full" if full else "changed", n, skipped, dict(roles.most_common()))
+            rnd += 1
             await asyncio.sleep(interval)
 
     def _chat_to_mesh(self, ev):

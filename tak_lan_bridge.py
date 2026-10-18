@@ -126,7 +126,10 @@ def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0, room_id=ALL_CHAT
     ev = new_event(f"GeoChat.{sender_uid}.{room_id}.{msg_id}", "b-t-f", "h-g-i-g-o",
                    lat, lon, timedelta(days=1))
     d = detail_of(ev)
-    chat = ET.SubElement(d, "__chat", parent="RootContactGroup", groupOwner="false",
+    # ATAK files its own custom group chats under "UserGroups" and lists every member;
+    # it only opens a conversation for a group it is a member of (WinTAK is more lenient).
+    parent = "RootContactGroup" if room_id == ALL_CHAT else "UserGroups"
+    chat = ET.SubElement(d, "__chat", parent=parent, groupOwner="false",
                          messageId=msg_id, chatroom=room_name, id=room_id, senderCallsign=callsign)
     uids = {"uid0": sender_uid}
     for i, m in enumerate(members or ([room_id] if room_id == ALL_CHAT else []), start=1):
@@ -328,6 +331,7 @@ class Bridge:
         self.pending_dm = {}     # mesh packet id -> (atak uid, atak callsign, node_id, sent monotonic)
         self.dm_peer = {}        # mesh node_id -> (atak uid, atak callsign) that last wrote to it
         self.last_loopback = None
+        self.tak_users = {}      # TAK contacts seen via the server: uid -> callsign (room members)
         self.loop_log = None
         if b.get("loopback_log"):
             self.loop_log = logging.getLogger("tak-lan-bridge.loopback")
@@ -419,6 +423,12 @@ class Bridge:
             self.stats["server_bad"] += 1
             return
         cot_type, uid = ev.get("type", ""), ev.get("uid", "")
+        contact = ev.find("detail/contact")
+        if (cot_type.startswith("a-") and contact is not None and contact.get("endpoint")
+                and uid != self.uid and not uid.startswith("MESHTASTIC-")):
+            if uid not in self.tak_users:
+                log.info("TAK user %s (%s) added to the mesh room members", contact.get("callsign"), uid)
+            self.tak_users[uid] = contact.get("callsign", uid)
         if (cot_type.startswith("t-x") or self._has_our_tag(ev)
                 or not cot_type.startswith(self.allow_types) or uid.startswith(self.deny_uids)
                 or self._is_dup(ev)):
@@ -484,7 +494,7 @@ class Bridge:
         if self.mesh_room_id == ALL_CHAT:
             return geochat_event(uid, name, text)
         return geochat_event(uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
-                             members=[self.uid])
+                             members=[self.uid, *sorted(self.tak_users)])
 
     def _mesh_marker(self, node_id, pos, heard, packet=None):
         """A mesh node as a map marker (not a TAK contact: no endpoint, no team).
@@ -634,7 +644,17 @@ class Bridge:
             self.reply(sender_uid, callsign,
                        "MESH-GW loopback. Anything: echoed. '@<node> text': Meshtastic DM to a node "
                        "(!id, short or long name; quote names with spaces: @\"Long Name\" hi). "
-                       "'stats': bridge counters. Mesh replies to DMs arrive here.")
+                       "'stats': bridge counters. 'roomtest': test message in the mesh room (TAK only). Mesh replies to DMs arrive here.")
+        elif text.lower() == "roomtest":
+            # A message into the mesh room from the bridge itself (TAK only, not sent to the mesh)
+            self.tak_users.setdefault(sender_uid, callsign)
+            ev = geochat_event(self.uid, self.callsign, f"room test for {callsign} ({len(self.tak_users)} TAK members)",
+                               room_id=self.mesh_room_id, room_name=self.mesh_room_name,
+                               members=sorted(self.tak_users))
+            self._tag(ev)
+            self._enqueue_server(ev)
+            self.reply(sender_uid, callsign, f"posted a test message to {self.mesh_room_name!r}, "
+                                             f"members: {', '.join(self.tak_users.values())}")
         elif text.lower() == "stats":
             self.reply(sender_uid, callsign, ", ".join(f"{k}={v}" for k, v in sorted(self.stats.items())))
         elif text.startswith("@"):

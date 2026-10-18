@@ -12,6 +12,7 @@ sa_interval_seconds = 60           # own SA + takPing to the server
 stats_interval_seconds = 300
 
 [lan]
+enabled = true                     # false: Meshtastic gateway only (no multicast), e.g. a laptop behind NAT
 interface = "eth0"                 # LAN side. Wired is more reliable for multicast than wlan0
 # address = "192.168.1.20"         # overrides the interface lookup
 ttl = 1
@@ -43,11 +44,15 @@ min_interval_seconds = 5           # per-uid rate limit for non-chat events
 
 [meshtastic]                       # Mode B: node on USB/TCP. Do not combine with Mode A for the same node
 enabled = false
-device = "/dev/ttyACM0"            # or: host = "192.168.1.50" (node on Wi-Fi, TCP API port 4403)
-to_lan = true                      # also show mesh nodes/chat on the LAN multicast
-cot_type = "a-f-G-U-C"
-team = "Green"
-pli_stale_minutes = 15
-chat_to_mesh = true                # All Chat Rooms -> mesh broadcast text
+device = "/dev/ttyACM0"            # or: host = "192.168.1.50" (node on Wi-Fi, TCP API port 4403; one TCP client at a time)
+channel_index = 0                  # mesh channel bridged to chat (0 = primary, e.g. public MediumFast)
+chatroom = "Meshtastic MediumFast" # GeoChat room for that channel; "All Chat Rooms" to use All Chat instead
+# chatroom_id = "MESHTASTIC-Meshtastic MediumFast"
+cot_type = "a-n-G"                 # node markers: neutral ground (public nodes are not our units)
+marker_max_age_minutes = 180       # marker stale = last heard + this
+sweep_interval_seconds = 300       # republish all recently heard nodes from the node database
+chat_to_mesh = true                # messages posted in the room -> mesh broadcast on channel_index
+all_chat_to_mesh = false           # also forward All Chat Rooms
 chat_from_lan = true
 chat_min_interval_seconds = 15     # EU868 duty cycle: keep mesh chat sparse
+to_lan = true                      # also show mesh nodes/chat on the LAN multicast

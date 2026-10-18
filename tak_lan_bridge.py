@@ -4,8 +4,11 @@
 LAN side:    SA multicast 239.2.3.1:6969 and GeoChat multicast 224.10.10.1:17012
              (XML or TAK protocol v1 mesh protobuf in, XML out).
 Server side: one streaming connection (TLS with a client cert, or plain TCP) carrying XML CoT.
-Optional:    a Meshtastic node on USB serial or TCP. Its positions become PLI, its broadcast
-             texts become GeoChat, and All Chat Rooms messages are sent to the mesh.
+Optional:    a Meshtastic node on USB serial or TCP. Mesh nodes with a position become map
+             markers (refreshed from the node database), broadcast texts on one channel go to a
+             GeoChat room, and messages posted in that room are sent to the mesh.
+             The LAN side can be switched off ([lan] enabled = false) to run as a pure
+             Meshtastic gateway, e.g. on a laptop behind NAT.
 
 Loop protection: a _flow-tags_ marker on every event this bridge forwards, a (uid, time, type)
 dedupe cache, multicast loopback off, and packets from our own LAN address are ignored.
@@ -27,7 +30,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 log = logging.getLogger("tak-lan-bridge")
 
 MESH_HEADER = b"\xbf\x01\xbf"
@@ -86,17 +89,24 @@ def detail_of(ev):
     return d
 
 
-def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0):
-    """GeoChat message to All Chat Rooms, in the shape ATAK sends it."""
+def geochat_event(sender_uid, callsign, text, lat=0.0, lon=0.0, room_id=ALL_CHAT, room_name=None,
+                  members=()):
+    """GeoChat message in the shape ATAK sends it. Default: All Chat Rooms. With room_id/room_name
+    it is a named group chat; ATAK opens a conversation for an unknown room id on first receipt,
+    and replies go back to the room id (members are the chatgrp uids after the sender)."""
     msg_id = str(uuid.uuid4())
-    ev = new_event(f"GeoChat.{sender_uid}.{ALL_CHAT}.{msg_id}", "b-t-f", "h-g-i-g-o",
+    room_name = room_name or room_id
+    ev = new_event(f"GeoChat.{sender_uid}.{room_id}.{msg_id}", "b-t-f", "h-g-i-g-o",
                    lat, lon, timedelta(days=1))
     d = detail_of(ev)
     chat = ET.SubElement(d, "__chat", parent="RootContactGroup", groupOwner="false",
-                         messageId=msg_id, chatroom=ALL_CHAT, id=ALL_CHAT, senderCallsign=callsign)
-    ET.SubElement(chat, "chatgrp", uid0=sender_uid, uid1=ALL_CHAT, id=ALL_CHAT)
+                         messageId=msg_id, chatroom=room_name, id=room_id, senderCallsign=callsign)
+    uids = {"uid0": sender_uid}
+    for i, m in enumerate(members or ([room_id] if room_id == ALL_CHAT else []), start=1):
+        uids[f"uid{i}"] = m
+    ET.SubElement(chat, "chatgrp", id=room_id, **uids)
     ET.SubElement(d, "link", uid=sender_uid, type="a-f-G-U-C", relation="p-p")
-    remarks = ET.SubElement(d, "remarks", source=f"BAO.F.ATAK.{sender_uid}", to=ALL_CHAT,
+    remarks = ET.SubElement(d, "remarks", source=f"BAO.F.ATAK.{sender_uid}", to=room_id,
                             time=ev.get("time"))
     remarks.text = text
     return ev
@@ -203,15 +213,21 @@ class MeshtasticLink:
             self.iface = meshtastic.serial_interface.SerialInterface(devPath=cfg.get("device"))
         my = getattr(self.iface, "myInfo", None)
         self.my_num = getattr(my, "my_node_num", None)
-        log.info("meshtastic connected, my node %s", self.my_num)
+        log.info("meshtastic connected, my node %s, %d nodes in its database",
+                 self.my_num, len(self.iface.nodes or {}))
 
     def _on_receive(self, packet, interface):
         self.loop.call_soon_threadsafe(self.bridge.on_mesh_packet, packet)
 
+    def node(self, node_id):
+        return (self.iface.nodes or {}).get(node_id) or {}
+
     def node_name(self, node_id):
-        node = (self.iface.nodes or {}).get(node_id) or {}
-        user = node.get("user") or {}
+        user = self.node(node_id).get("user") or {}
         return user.get("longName") or user.get("shortName") or node_id
+
+    def nodes(self):
+        return list((self.iface.nodes or {}).items())
 
     async def send_text(self, text):
         await self.loop.run_in_executor(None, self.iface.sendText, text)
@@ -233,19 +249,27 @@ class Bridge:
         self.flow_tag = f"tak-lan-bridge-{self.name}"
         self.uid = f"LANBRIDGE-{self.name}"
         self.dedupe_s = float(b.get("dedupe_seconds", 30))
-        self.lan_ip = lan.get("address") or iface_ipv4(lan["interface"])
+        self.lan_enabled = lan.get("enabled", True)
         self.sa_group = parse_hostport(lan.get("sa_group", "239.2.3.1:6969"))
         self.chat_group = parse_hostport(lan.get("chat_group", "224.10.10.1:17012"))
         self.ignore_own_ip = lan.get("ignore_own_ip", True)
-        self.tx = mcast_tx_socket(self.lan_ip, int(lan.get("ttl", 1)), lan.get("multicast_loop", False))
+        self.lan_ip, self.tx = None, None
+        if self.lan_enabled:
+            self.lan_ip = lan.get("address") or iface_ipv4(lan["interface"])
+            self.tx = mcast_tx_socket(self.lan_ip, int(lan.get("ttl", 1)), lan.get("multicast_loop", False))
         self.srv = srv
         up, down = cfg.get("uplink", {}), cfg.get("downlink", {})
         self.rewrite_endpoint = up.get("rewrite_endpoint", True)
         self.allow_types = tuple(down.get("allow_type_prefixes", ["a-", "b-t-f", "b-m-p", "u-d-", "b-a-"]))
         self.deny_uids = tuple(down.get("deny_uid_prefixes", []))
         self.min_interval = float(down.get("min_interval_seconds", 5))
-        self.mesh_cfg = cfg.get("meshtastic", {})
+        self.mesh_cfg = m = cfg.get("meshtastic", {})
         self.mesh = None
+        self.mesh_channel = int(m.get("channel_index", 0))
+        room = m.get("chatroom", ALL_CHAT)
+        self.mesh_room_name = room
+        self.mesh_room_id = room if room == ALL_CHAT else m.get("chatroom_id", f"MESHTASTIC-{room}")
+        self.mesh_max_age = timedelta(minutes=float(m.get("marker_max_age_minutes", 180)))
         self.to_server = asyncio.Queue(maxsize=int(srv.get("queue_size", 1000)))
         self.seen = {}
         self.last_down = {}
@@ -282,6 +306,8 @@ class Bridge:
         self.to_server.put_nowait(ev)
 
     def _send_lan(self, ev):
+        if not self.lan_enabled:
+            return
         group = self.chat_group if ev.get("type", "").startswith("b-t-f") else self.sa_group
         try:
             self.tx.sendto(ET.tostring(ev), group)
@@ -354,38 +380,105 @@ class Bridge:
         if self.mesh is None or packet.get("from") == self.mesh.my_num:
             return
         node_id = packet.get("fromId") or f"!{packet.get('from', 0):08x}"
-        uid = f"MESHTASTIC-{node_id.lstrip('!')}"
-        name = self.mesh.node_name(node_id)
         if port == "POSITION_APP":
-            pos = dec.get("position") or {}
-            lat = pos.get("latitude", pos.get("latitudeI", 0) * 1e-7)
-            lon = pos.get("longitude", pos.get("longitudeI", 0) * 1e-7)
-            if not lat and not lon:
+            self.stats["mesh_position_rx"] += 1
+            ev = self._mesh_marker(node_id, dec.get("position") or {}, utcnow(), packet)
+            if ev is None:
                 return
-            ev = new_event(uid, self.mesh_cfg.get("cot_type", "a-f-G-U-C"), "m-g", lat, lon,
-                           timedelta(minutes=float(self.mesh_cfg.get("pli_stale_minutes", 15))),
-                           hae=pos.get("altitude", 9999999.0))
-            d = detail_of(ev)
-            ET.SubElement(d, "contact", callsign=name, endpoint=SERVER_ENDPOINT)
-            ET.SubElement(d, "__group", name=self.mesh_cfg.get("team", "Green"), role="Team Member")
-            ET.SubElement(d, "remarks").text = f"Meshtastic {node_id} via {self.name}"
             self.stats["mesh_pli"] += 1
         elif port == "TEXT_MESSAGE_APP" and packet.get("toId") == "^all":
-            ev = geochat_event(uid, name, dec.get("text", ""))
+            if int(packet.get("channel", 0)) != self.mesh_channel:
+                self.stats["mesh_chat_other_channel"] += 1
+                return
+            ev = self._mesh_chat(node_id, dec.get("text", ""))
             self.stats["mesh_chat"] += 1
+            log.info("mesh chat %s: %s", self.mesh.node_name(node_id), dec.get("text", ""))
         else:
             return
+        self._forward_mesh(ev)
+
+    def _forward_mesh(self, ev):
         self._tag(ev)
         self._enqueue_server(ev)
         if self.mesh_cfg.get("to_lan", True):
             self._send_lan(ev)
+
+    def _mesh_chat(self, node_id, text):
+        uid = f"MESHTASTIC-{node_id.lstrip('!')}"
+        name = self.mesh.node_name(node_id)
+        if self.mesh_room_id == ALL_CHAT:
+            return geochat_event(uid, name, text)
+        return geochat_event(uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
+                             members=[self.uid])
+
+    def _mesh_marker(self, node_id, pos, heard, packet=None):
+        """A mesh node as a map marker (not a TAK contact: no endpoint, no team).
+        Stale = last heard + marker_max_age_minutes, so silent nodes fade out on their own."""
+        lat = pos.get("latitude", pos.get("latitudeI", 0) * 1e-7)
+        lon = pos.get("longitude", pos.get("longitudeI", 0) * 1e-7)
+        if not lat and not lon:
+            return None
+        stale = heard + self.mesh_max_age - utcnow()
+        if stale <= timedelta(0):
+            return None
+        node = self.mesh.node(node_id)
+        user = node.get("user") or {}
+        uid = f"MESHTASTIC-{node_id.lstrip('!')}"
+        ev = new_event(uid, self.mesh_cfg.get("cot_type", "a-n-G"), "m-g", lat, lon, stale,
+                       hae=pos.get("altitude", 9999999.0))
+        ev.set("start", cot_time(heard))
+        d = detail_of(ev)
+        ET.SubElement(d, "contact", callsign=user.get("longName") or user.get("shortName") or node_id)
+        bits = [f"Meshtastic {node_id}"]
+        if user.get("shortName"):
+            bits.append(f"short {user['shortName']}")
+        if user.get("hwModel"):
+            bits.append(str(user["hwModel"]))
+        hops = node.get("hopsAway")
+        if packet and packet.get("hopStart") is not None and packet.get("hopLimit") is not None:
+            hops = packet["hopStart"] - packet["hopLimit"]
+        if hops is not None:
+            bits.append(f"hops {hops}")
+        snr = (packet or {}).get("rxSnr", node.get("snr"))
+        if snr is not None:
+            bits.append(f"SNR {snr} dB")
+        batt = (node.get("deviceMetrics") or {}).get("batteryLevel")
+        if batt is not None:
+            bits.append("powered" if batt > 100 else f"battery {batt}%")
+        bits.append("heard " + heard.astimezone().strftime("%Y-%m-%d %H:%M"))
+        bits.append(f"via {self.name}")
+        ET.SubElement(d, "remarks").text = ", ".join(bits)
+        ET.SubElement(d, "precisionlocation", geopointsrc="GPS", altsrc="GPS")
+        return ev
+
+    async def mesh_sweep_loop(self):
+        """Publish every node in the node database that has a position and was heard recently.
+        Fills the map at start-up and keeps markers alive between (infrequent) position packets."""
+        interval = float(self.mesh_cfg.get("sweep_interval_seconds", 300))
+        while True:
+            n = 0
+            for node_id, node in self.mesh.nodes():
+                last = node.get("lastHeard") or (node.get("position") or {}).get("time")
+                if not last:
+                    continue
+                heard = datetime.fromtimestamp(last, timezone.utc)
+                ev = self._mesh_marker(node_id, node.get("position") or {}, heard)
+                if ev is not None:
+                    self._forward_mesh(ev)
+                    n += 1
+            self.stats["mesh_sweep_markers"] = n
+            log.info("mesh sweep: %d node markers published", n)
+            await asyncio.sleep(interval)
 
     def _chat_to_mesh(self, ev):
         if self.mesh is None or not self.mesh_cfg.get("chat_to_mesh", True):
             return
         chat = ev.find("detail/__chat")
         remarks = ev.find("detail/remarks")
-        if chat is None or remarks is None or chat.get("id") != ALL_CHAT:
+        if chat is None or remarks is None:
+            return
+        if chat.get("id") != self.mesh_room_id and not (
+                chat.get("id") == ALL_CHAT and self.mesh_cfg.get("all_chat_to_mesh", False)):
             return
         link = ev.find("detail/link")
         if link is not None and link.get("uid", "").startswith("MESHTASTIC-"):
@@ -399,6 +492,7 @@ class Bridge:
         text = f"{chat.get('senderCallsign', '?')}: {remarks.text or ''}"[:200]
         asyncio.get_running_loop().create_task(self.mesh.send_text(text))
         self.stats["chat_to_mesh"] += 1
+        log.info("chat -> mesh channel %d: %s", self.mesh_channel, text)
 
     # ---- own presence
 
@@ -411,7 +505,7 @@ class Bridge:
         ET.SubElement(d, "__group", name=b.get("team", "Cyan"), role=b.get("role", "HQ"))
         ET.SubElement(d, "takv", device=socket.gethostname(), platform="tak-lan-bridge",
                       os="Linux", version=__version__)
-        ET.SubElement(d, "remarks").text = f"LAN bridge {self.lan_ip}: " + ", ".join(
+        ET.SubElement(d, "remarks").text = f"LAN bridge {self.lan_ip or 'no LAN'}: " + ", ".join(
             f"{k}={v}" for k, v in sorted(self.stats.items()))
         return ev
 
@@ -506,14 +600,20 @@ class Bridge:
 
     async def run(self):
         loop = asyncio.get_running_loop()
-        for label, (group, port) in (("sa", self.sa_group), ("chat", self.chat_group)):
-            await loop.create_datagram_endpoint(lambda label=label: _McastRx(self, label),
-                                                sock=mcast_rx_socket(group, port, self.lan_ip))
-        log.info("listening on %s:%s and %s:%s via %s", *self.sa_group, *self.chat_group, self.lan_ip)
+        if self.lan_enabled:
+            for label, (group, port) in (("sa", self.sa_group), ("chat", self.chat_group)):
+                await loop.create_datagram_endpoint(lambda label=label: _McastRx(self, label),
+                                                    sock=mcast_rx_socket(group, port, self.lan_ip))
+            log.info("listening on %s:%s and %s:%s via %s", *self.sa_group, *self.chat_group, self.lan_ip)
+        else:
+            log.info("LAN multicast disabled")
+        tasks = [self.server_loop(), self.stats_loop()]
         if self.mesh_cfg.get("enabled"):
             self.mesh = await loop.run_in_executor(None, MeshtasticLink, self, self.mesh_cfg, loop)
+            log.info("mesh chat: channel %d <-> GeoChat room %r", self.mesh_channel, self.mesh_room_name)
+            tasks.append(self.mesh_sweep_loop())
         try:
-            await asyncio.gather(self.server_loop(), self.stats_loop())
+            await asyncio.gather(*tasks)
         finally:
             if self.mesh:
                 self.mesh.close()

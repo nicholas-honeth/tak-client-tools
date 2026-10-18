@@ -1,0 +1,53 @@
+# tak-lan-bridge config. Copy to /etc/tak-lan-bridge/config.toml (mode 640, group tak-bridge).
+
+[bridge]
+name = "home"                      # site id: used in the bridge uid (LANBRIDGE-home) and flow tag
+callsign = "LAN-BRIDGE-HOME"
+lat = 59.3470                      # where the bridge marker is shown
+lon = 18.0730
+team = "Cyan"
+role = "HQ"
+dedupe_seconds = 30                # drop the same (uid, time, type) seen again within this window
+sa_interval_seconds = 60           # own SA + takPing to the server
+stats_interval_seconds = 300
+
+[lan]
+interface = "eth0"                 # LAN side. Wired is more reliable for multicast than wlan0
+# address = "192.168.1.20"         # overrides the interface lookup
+ttl = 1
+sa_group = "239.2.3.1:6969"
+chat_group = "224.10.10.1:17012"
+# Test-only switches (same-host smoke test):
+# multicast_loop = true
+# ignore_own_ip = false
+
+[server]
+host = "10.8.8.46"                 # OTS on Aristo, over wg0
+port = 8089
+tls = true
+ca = "/etc/tak-lan-bridge/ca.pem"          # OTS CA (truststore converted to PEM)
+cert = "/etc/tak-lan-bridge/client.pem"    # client cert for OTS user "lan-bridge-home"
+key = "/etc/tak-lan-bridge/client.key"
+# key_password = ""
+verify_hostname = true             # needs 10.8.8.46 (or the DNS name) in the server cert SAN
+# server_hostname = "tak.wg"
+queue_size = 1000
+
+[uplink]                           # LAN -> server
+rewrite_endpoint = true            # contact endpoint -> "*:-1:stcp" so server users DM via the server
+
+[downlink]                         # server -> LAN
+allow_type_prefixes = ["a-", "b-t-f", "b-m-p", "u-d-", "b-a-"]
+deny_uid_prefixes = ["ICAO-", "MMSI-", "APRS"]   # keep the big feeds off the LAN (check the uid formats used by OTS/aprscot)
+min_interval_seconds = 5           # per-uid rate limit for non-chat events
+
+[meshtastic]                       # Mode B: node on USB/TCP. Do not combine with Mode A for the same node
+enabled = false
+device = "/dev/ttyACM0"            # or: host = "192.168.1.50" (node on Wi-Fi, TCP API port 4403)
+to_lan = true                      # also show mesh nodes/chat on the LAN multicast
+cot_type = "a-f-G-U-C"
+team = "Green"
+pli_stale_minutes = 15
+chat_to_mesh = true                # All Chat Rooms -> mesh broadcast text
+chat_from_lan = true
+chat_min_interval_seconds = 15     # EU868 duty cycle: keep mesh chat sparse

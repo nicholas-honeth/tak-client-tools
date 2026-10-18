@@ -300,6 +300,7 @@ class Bridge:
             h = logging.FileHandler(b["loopback_log"])
             h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
             self.loop_log.addHandler(h)
+            self.loop_log.propagate = False   # _loop_log already writes to the main log
         self.to_server = asyncio.Queue(maxsize=int(srv.get("queue_size", 1000)))
         self.seen = {}
         self.last_down = {}

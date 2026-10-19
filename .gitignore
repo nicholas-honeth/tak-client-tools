@@ -1,5 +1,13 @@
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Runtime files and secrets: never commit these
 config.toml
 *.key
-.venv/
+*.pem
+*.csr
+*.p12
+*.srl
+*.log

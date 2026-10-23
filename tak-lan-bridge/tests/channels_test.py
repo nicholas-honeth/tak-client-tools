@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -62,6 +63,7 @@ def make_link(bridge):
     m = tlb.MeshtasticLink.__new__(tlb.MeshtasticLink)
     m.bridge, m.cfg, m.loop = bridge, {}, asyncio.get_running_loop()
     m.iface, m.my_num, m.last_send = FakeIface(), 1, 0.0
+    m.last_rx, m.lost = time.monotonic(), False
     return m
 
 
@@ -208,6 +210,26 @@ async def main(tmp):
     bridge.reply_times.clear()   # earlier commands used up the reply circuit breaker
     r = await say("channel add " + link(("Full", b"f" * 32)))
     check("library sys.exit() is caught and reported", any("channel command failed" in x for x in r))
+
+    # node link watchdog: connection lost, or nothing heard for mesh_idle_restart_minutes
+    tlb.MESH_WATCH_SECONDS = 0.01
+
+    async def watch_raises():
+        try:
+            await asyncio.wait_for(bridge.mesh_watch_loop(), 0.5)
+        except tlb.MeshLost as e:
+            return str(e)
+        except asyncio.TimeoutError:
+            return None
+    bridge.mesh.last_rx = time.monotonic()
+    check("watchdog quiet while the node talks", await watch_raises() is None)
+    bridge.mesh._on_lost(interface=None)
+    check("watchdog exits on connection lost", await watch_raises() == "meshtastic connection lost")
+    bridge.mesh.lost, bridge.mesh.last_rx = False, time.monotonic() - 31 * 60
+    check("watchdog exits after 30 min of silence", "nothing heard" in (await watch_raises() or ""))
+    bridge.mesh.lost = False
+    bridge.mesh_cfg["mesh_idle_restart_minutes"] = 0
+    check("idle watchdog can be switched off", await watch_raises() is None)
 
 
 if __name__ == "__main__":

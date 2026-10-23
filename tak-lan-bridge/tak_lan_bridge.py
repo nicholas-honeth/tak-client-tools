@@ -42,8 +42,9 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 log = logging.getLogger("tak-lan-bridge")
+MESH_WATCH_SECONDS = 30            # how often mesh_watch_loop checks the node link
 
 MESH_HEADER = b"\xbf\x01\xbf"
 SERVER_ENDPOINT = "*:-1:stcp"  # how a server-connected ATAK advertises itself
@@ -315,6 +316,10 @@ def mcast_tx_socket(lan_ip, ttl, loop):
 
 # ---------------------------------------------------------------- Meshtastic
 
+class MeshLost(Exception):
+    """The meshtastic link is gone. The bridge exits so systemd (Restart=always) starts it afresh."""
+
+
 class MeshtasticLink:
     """Owns the meshtastic interface. Its callbacks run on meshtastic's thread and
     are handed to the asyncio loop."""
@@ -323,7 +328,10 @@ class MeshtasticLink:
         from pubsub import pub
         self.bridge, self.cfg, self.loop = bridge, cfg, loop
         self.last_send = 0.0
+        self.last_rx = time.monotonic()
+        self.lost = False
         pub.subscribe(self._on_receive, "meshtastic.receive")
+        pub.subscribe(self._on_lost, "meshtastic.connection.lost")
         if cfg.get("host"):
             import meshtastic.tcp_interface
             self.iface = meshtastic.tcp_interface.TCPInterface(cfg["host"])
@@ -336,7 +344,12 @@ class MeshtasticLink:
                  self.my_num, len(self.iface.nodes or {}))
 
     def _on_receive(self, packet, interface):
+        self.last_rx = time.monotonic()
         self.loop.call_soon_threadsafe(self.bridge.on_mesh_packet, packet)
+
+    def _on_lost(self, interface):
+        # The library retries a dropped TCP socket once; after that its reader thread is dead.
+        self.lost = True
 
     async def request_nodeinfo(self, dest_num):
         """Ask a node for its NODEINFO (name, short name, hw): send ours with wantResponse, as the
@@ -1326,6 +1339,20 @@ class Bridge:
                 log.warning("discarding 1 MB of unframed server data")
                 buf = b""
 
+    async def mesh_watch_loop(self):
+        """Exit when the node link is gone: meshtastic reports the connection lost, or nothing at all
+        has been heard for mesh_idle_restart_minutes (a node that lost power leaves a half-open
+        socket and no error). Before this, the bridge kept running without the node (2026-10-19)."""
+        idle = float(self.mesh_cfg.get("mesh_idle_restart_minutes", 30)) * 60
+        while True:
+            await asyncio.sleep(MESH_WATCH_SECONDS)
+            if self.mesh.lost:
+                raise MeshLost("meshtastic connection lost")
+            quiet = time.monotonic() - self.mesh.last_rx
+            if idle > 0 and quiet > idle:
+                self.mesh.lost = True
+                raise MeshLost(f"nothing heard from the node for {quiet / 60:.0f} min")
+
     async def stats_loop(self):
         while True:
             await asyncio.sleep(float(self.cfg["bridge"].get("stats_interval_seconds", 300)))
@@ -1346,11 +1373,13 @@ class Bridge:
             log.info("mesh chat: channel %d <-> GeoChat room %r", self.mesh_channel, self.mesh_room_name)
             self._load_channels()
             self._sync_channel_rooms()
-            tasks.append(self.mesh_sweep_loop())
+            tasks += [self.mesh_sweep_loop(), self.mesh_watch_loop()]
         try:
             await asyncio.gather(*tasks)
+        except MeshLost:
+            raise                # don't close(): it writes to the dead socket, which makes the library reconnect
         finally:
-            if self.mesh:
+            if self.mesh and not self.mesh.lost:
                 self.mesh.close()
 
 
@@ -1372,6 +1401,10 @@ def main():
         asyncio.run(Bridge(cfg).run())
     except KeyboardInterrupt:
         pass
+    except MeshLost as e:
+        log.error("%s, exiting so the service manager restarts the bridge", e)
+        logging.shutdown()
+        os._exit(1)          # meshtastic's heartbeat Timer is not a daemon thread and would keep us alive
 
 
 if __name__ == "__main__":

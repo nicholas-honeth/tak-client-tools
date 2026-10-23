@@ -38,15 +38,15 @@ cd ~/tak-client-tools
 
 ### 1. Client cert
 
-The OTS username is the cert CN. With SSH access to the OTS host (default `aristo`, compose dir `~/tak`):
+The OTS username is the cert CN. With SSH access to the OTS host (`OTS_SSH`, required; compose dir `OTS_DIR`, default `~/tak`):
 
 ```bash
 mkdir -p ~/tak-client && cd ~/tak-client
-~/tak-client-tools/tools/ots-client-cert.sh --create-user meshbridge-site2 meshbridge-site2
+OTS_SSH=my-ots-host ~/tak-client-tools/tools/ots-client-cert.sh --create-user meshbridge-site2 meshbridge-site2
 # → ~/tak-client/meshbridge-site2/{meshbridge-site2.key,meshbridge-site2.pem,ca.pem}
 ```
 
-Leave out `--create-user` if the OTS user already exists. Override the server with `OTS_SSH=host OTS_DIR=path`. Run `tools/ots-client-cert.sh -h` (or read its header) for the other options.
+Leave out `--create-user` if the OTS user already exists. Set `OTS_DIR=path` if the compose project lives elsewhere. Run `tools/ots-client-cert.sh -h` (or read its header) for the other options.
 
 ### 2a. Systemd service (Raspberry Pi, any Debian-like host)
 
@@ -56,7 +56,7 @@ sudo cp ~/tak-client/NAME/NAME.pem /etc/tak-lan-bridge/client.pem
 sudo cp ~/tak-client/NAME/NAME.key /etc/tak-lan-bridge/client.key
 sudo cp ~/tak-client/NAME/ca.pem   /etc/tak-lan-bridge/ca.pem
 sudo chgrp tak-bridge /etc/tak-lan-bridge/* && sudo chmod 640 /etc/tak-lan-bridge/*
-sudoedit /etc/tak-lan-bridge/config.toml     # [bridge] name/callsign/lat/lon, [lan] interface, [meshtastic]
+sudoedit /etc/tak-lan-bridge/config.toml     # [server] host (required), [bridge] name/callsign/lat/lon, [lan] interface, [meshtastic]
 sudo systemctl restart tak-lan-bridge && journalctl -u tak-lan-bridge -f
 ```
 

@@ -25,14 +25,14 @@ chat_group = "224.10.10.1:17012"
 # ignore_own_ip = false
 
 [server]
-host = "10.8.8.46"                 # OTS on Aristo, over wg0
+host = ""                          # REQUIRED: the OTS address, e.g. its WireGuard IP
 port = 8089
 tls = true
 ca = "/etc/tak-lan-bridge/ca.pem"          # OTS CA (truststore converted to PEM)
 cert = "/etc/tak-lan-bridge/client.pem"    # client cert for OTS user "lan-bridge-home"
 key = "/etc/tak-lan-bridge/client.key"
 # key_password = ""
-verify_hostname = true             # needs 10.8.8.46 (or the DNS name) in the server cert SAN
+verify_hostname = true             # needs host (IP or DNS name) in the server cert SAN
 # server_hostname = "tak.wg"
 queue_size = 1000
 

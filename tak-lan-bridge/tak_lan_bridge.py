@@ -1361,6 +1361,8 @@ def main():
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
+    if not cfg.get("server", {}).get("host"):
+        sys.exit(f"{args.config}: [server] host is required (the OTS address)")
     # Channel registry next to the config unless set (a read-only /etc needs channels_file in [meshtastic])
     cfg.setdefault("meshtastic", {}).setdefault(
         "channels_file", os.path.join(os.path.dirname(os.path.abspath(args.config)), "channels.json"))

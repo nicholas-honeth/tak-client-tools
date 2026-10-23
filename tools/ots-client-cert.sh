@@ -8,7 +8,7 @@
 #   --create-user  also create the OTS user NAME (random password, never used)
 #
 # Environment:
-#   OTS_SSH        ssh target of the OTS host        (default: aristo)
+#   OTS_SSH        ssh target of the OTS host        (required)
 #   OTS_DIR        compose project dir on that host   (default: ~/tak)
 #   OTS_SERVICE    compose service running OTS        (default: ots)
 #   CERT_DAYS      validity in days                   (default: 730)
@@ -22,7 +22,7 @@ name=${1:?usage: $0 [--create-user] NAME [OUTDIR]}
 outdir=${2:-./$name}
 [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "NAME may only contain letters, digits, . _ -" >&2; exit 1; }
 
-ssh_host=${OTS_SSH:-aristo}
+ssh_host=${OTS_SSH:?set OTS_SSH to the ssh target of the OTS host}
 ots_dir=${OTS_DIR:-'~/tak'}
 svc=${OTS_SERVICE:-ots}
 days=${CERT_DAYS:-730}

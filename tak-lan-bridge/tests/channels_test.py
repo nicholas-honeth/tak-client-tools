@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 """Channel rooms ("channel add/list/remove") against meshtastic's real Node channel table, no radio.
 
 Usage: .venv/bin/python -I tak-lan-bridge/tests/channels_test.py   (needs the meshtastic package)

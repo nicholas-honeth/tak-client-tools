@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 # Enrol a cert-only OpenTAKServer client (service account, bridge, script).
 # The private key is generated here and never leaves this host; only the CSR goes to the server.
 #
@@ -15,7 +17,7 @@
 #   CERT_SUBJ_EXTRA  extra subject fields             (default: /O=HonethTAKLab/OU=OpenTAKServer)
 set -euo pipefail
 
-case ${1:-} in -h|--help|"") sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
+case ${1:-} in -h|--help|"") sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;; esac
 create_user=0
 if [[ ${1:-} == --create-user ]]; then create_user=1; shift; fi
 name=${1:?usage: $0 [--create-user] NAME [OUTDIR]}

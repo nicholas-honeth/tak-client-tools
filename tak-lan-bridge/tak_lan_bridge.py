@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 """tak-lan-bridge: bridge a LAN's TAK Mesh SA multicast to a TAK server and back.
 
 LAN side:    SA multicast 239.2.3.1:6969 and GeoChat multicast 224.10.10.1:17012

@@ -83,4 +83,8 @@ python3 tak-lan-bridge/tests/smoke_test.py eth0   # fake TLS TAK server + multic
 
 ## License
 
-GPL-3.0, see `LICENSE`.
+Copyright (C) 2026 Nicholas Honeth. GNU General Public License v3.0 or later (`GPL-3.0-or-later`), see `LICENSE`.
+Each source file carries an SPDX header.
+
+The Meshtastic gateway uses the [`meshtastic`](https://github.com/meshtastic/python) library (GPL-3.0-only),
+so a bridge running with it is distributed under GPLv3. [`takproto`](https://github.com/snstac/takproto) is MIT.

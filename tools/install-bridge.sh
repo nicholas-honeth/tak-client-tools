@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 # Install tak-lan-bridge as a systemd service (Raspberry Pi OS Bookworm / Debian / Ubuntu).
 # Idempotent: re-run after a git pull to update the code; config and certs are left alone.
 #

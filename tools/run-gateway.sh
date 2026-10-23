@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 # Run tak-lan-bridge in the background from a runtime directory (laptop / non-systemd use).
 # The directory holds config.toml, the certs it points to, bridge.log and loopback.log.
 #

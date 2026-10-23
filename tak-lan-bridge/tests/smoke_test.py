@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Nicholas Honeth
 """Same-host smoke test: a fake TLS TAK server plus multicast senders/receivers on one interface.
 
 Usage: python3 tests/smoke_test.py [interface]   (default: eth0)

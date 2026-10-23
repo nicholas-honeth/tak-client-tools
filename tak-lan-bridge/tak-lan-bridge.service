@@ -2,6 +2,8 @@
 Description=TAK LAN bridge (Mesh SA multicast <-> TAK server)
 Wants=network-online.target wg-quick@wg0.service
 After=network-online.target wg-quick@wg0.service
+# Never give up restarting (node or Wi-Fi down for a while: the bridge exits and retries every 5 s)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

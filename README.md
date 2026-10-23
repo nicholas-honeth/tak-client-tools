@@ -4,7 +4,7 @@ Client-side tools for an [OpenTAKServer](https://github.com/brian7704/OpenTAKSer
 
 | Path | What |
 |---|---|
-| `tak-lan-bridge/` | **tak-lan-bridge** (v0.3.0): bridges a LAN's TAK Mesh SA multicast and/or a Meshtastic node to an OTS over TLS. Single Python file, stdlib plus optional `takproto`/`meshtastic` |
+| `tak-lan-bridge/` | **tak-lan-bridge** (v0.4.0): bridges a LAN's TAK Mesh SA multicast and/or a Meshtastic node to an OTS over TLS. Single Python file, stdlib plus optional `takproto`/`meshtastic` |
 | `tools/ots-client-cert.sh` | Enrol a cert-only OTS client: key + CSR generated locally, signed by the OTS CA over SSH, `ca.pem` fetched and verified |
 | `tools/install-bridge.sh` | Install the bridge as a systemd service (`/opt/tak-lan-bridge`, `/etc/tak-lan-bridge`, user `tak-bridge`) |
 | `tools/run-gateway.sh` | Start/stop/status/log for a bridge run by hand from a runtime directory (laptop, WSL) |

@@ -67,3 +67,9 @@ show_tak_callsign = false          # prefix mesh texts with "<TAK callsign>: " (
 chat_from_lan = true
 chat_min_interval_seconds = 15     # EU868 duty cycle: keep mesh chat sparse
 to_lan = true                      # also show mesh nodes/chat on the LAN multicast
+# Channel rooms: "channel add <https://meshtastic.org/e/#... link>" in a DM to the bridge contact adds that
+# channel to the node (free secondary slot; the node's LoRa settings are never changed) with its own
+# GeoChat room. Open to every TAK user for now; the authority hook is Bridge._may().
+# channels_file = "/var/lib/tak-lan-bridge/channels.json"   # registry (names only, no keys).
+#                                    # Default: channels.json next to this config (read-only /etc: set this)
+# channel_room_prefix = "Meshtastic " # room name = prefix + channel name

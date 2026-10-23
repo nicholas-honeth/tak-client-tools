@@ -11,3 +11,4 @@ config.toml
 *.p12
 *.srl
 *.log
+channels.json

@@ -9,6 +9,8 @@ Optional:    a Meshtastic node on USB serial or TCP. Mesh nodes with a position 
              GeoChat room, and messages posted in that room are sent to the mesh.
              Direct messages to the bridge contact are a loopback/debug channel: they are logged and
              echoed, and "@<node> text" sends a Meshtastic direct message (replies come back there).
+             "channel add <link>" registers a Meshtastic channel link: the channel is added to the
+             node (secondary slot, LoRa settings untouched) and gets its own GeoChat room.
              The LAN side can be switched off ([lan] enabled = false) to run as a pure
              Meshtastic gateway, e.g. on a laptop behind NAT.
 
@@ -19,9 +21,15 @@ Prototype. See the vault note "TAK LAN Bridge Pi" for the spec.
 """
 import argparse
 import asyncio
+import base64
 import collections
+import dataclasses
 import fcntl
+import hashlib
+import json
 import logging
+import os
+import re
 import socket
 import ssl
 import struct
@@ -32,7 +40,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 log = logging.getLogger("tak-lan-bridge")
 
 MESH_HEADER = b"\xbf\x01\xbf"
@@ -60,6 +68,9 @@ SIOCGIFADDR = 0x8915
 # OTS stores GeoChat text in geochat.remarks varchar(255) before routing it; a longer message fails
 # to parse and is never delivered. Keep every chat message we send under this.
 MAX_CHAT = 250
+# Meshtastic channel links (https://meshtastic.org/e/#<base64 ChannelSet>, also "/e/?add=true#...").
+# They carry the channel key, so they are redacted from our logs.
+CHANNEL_LINK = re.compile(r"https?://meshtastic\.org/e/[^\s#]*#[A-Za-z0-9_\-+/=]+")
 
 
 def chunk_text(text, limit=MAX_CHAT):
@@ -89,6 +100,45 @@ def clip(text, limit=MAX_CHAT):
 
 
 # ---------------------------------------------------------------- helpers
+
+def redact_links(text):
+    return CHANNEL_LINK.sub("<channel link>", text)
+
+
+def parse_channel_link(url):
+    """Channel link -> apponly_pb2.ChannelSet. Raises ValueError. Unlike meshtastic's
+    Node.setURL this neither exits the process on bad input nor touches the LoRa config."""
+    from meshtastic.protobuf import apponly_pb2
+    _, sep, b64 = url.strip().partition("#")
+    if not sep or not b64:
+        raise ValueError("not a Meshtastic channel link (https://meshtastic.org/e/#...)")
+    b64 = b64.replace("-", "+").replace("_", "/")
+    cs = apponly_pb2.ChannelSet()
+    try:
+        cs.ParseFromString(base64.b64decode(b64 + "=" * (-len(b64) % 4)))
+    except Exception as e:
+        raise ValueError(f"cannot decode the channel link: {e}") from None
+    if not cs.settings:
+        raise ValueError("the link contains no channels")
+    return cs
+
+
+def channel_room_id(settings):
+    """Stable GeoChat room id for a Meshtastic channel: from its name and key, not from the bridge
+    name, so several gateways on the same channel share one room (multi-gateway plan). Only a
+    hash of the key is used."""
+    key = hashlib.sha256(settings.psk).hexdigest()[:16]
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"tak-lan-bridge/channel/{settings.name}/{key}"))
+
+
+@dataclasses.dataclass
+class Room:
+    """A GeoChat room bridged to one Meshtastic channel (index on our node)."""
+    id: str
+    name: str
+    channel: int
+    registered: dict = None     # registry entry for rooms added with "channel add"; None = the config room
+
 
 def iface_ipv4(name):
     """IPv4 address of a network interface (Linux)."""
@@ -327,6 +377,55 @@ class MeshtasticLink:
                 hits.append((node_id, node))
         return hits
 
+    # Channel table of our node. Blocking (admin messages to the node): call via run_in_executor.
+
+    def channels(self):
+        """Enabled channels (PRIMARY/SECONDARY) as protobuf Channel objects."""
+        from meshtastic.protobuf import channel_pb2
+        return [c for c in (self.iface.localNode.channels or [])
+                if c.role != channel_pb2.Channel.Role.DISABLED]
+
+    def channel_by_name(self, name):
+        return next((c for c in self.channels() if c.settings.name == name), None)
+
+    def add_channel(self, settings):
+        """Write `settings` to the first free slot as a SECONDARY channel; returns its index.
+        Only the channel is written, never the LoRa config (Node.setURL would also apply the
+        link's LoRa settings and could move the node off its preset)."""
+        from meshtastic.protobuf import channel_pb2
+        node = self.iface.localNode
+        ch = node.getDisabledChannel()
+        if ch is None:
+            raise ValueError("no free channel slot on the node (8 in use)")
+        ch.settings.CopyFrom(settings)
+        # Never uplink a private channel to an MQTT broker the node may be configured with
+        ch.settings.uplink_enabled = ch.settings.downlink_enabled = False
+        ch.role = channel_pb2.Channel.Role.SECONDARY
+        try:
+            node.writeChannel(ch.index)
+        except BaseException:
+            ch.role = channel_pb2.Channel.Role.DISABLED
+            ch.settings.Clear()
+            raise
+        return ch.index
+
+    def remove_channel(self, index):
+        """Delete a SECONDARY channel. Later channels move up one slot."""
+        from meshtastic.protobuf import channel_pb2
+        node = self.iface.localNode
+        if node.channels[index].role != channel_pb2.Channel.Role.SECONDARY:
+            raise ValueError(f"channel {index} is not a secondary channel")
+        node.deleteChannel(index)
+
+    def lora_preset(self):
+        """(region, modem preset) names of our node, or None."""
+        from meshtastic.protobuf import config_pb2
+        lora = getattr(self.iface.localNode.localConfig, "lora", None)
+        if lora is None or not lora.ListFields():   # config not loaded yet
+            return None
+        L = config_pb2.Config.LoRaConfig
+        return L.RegionCode.Name(lora.region), L.ModemPreset.Name(lora.modem_preset)
+
     def close(self):
         try:
             self.iface.close()
@@ -366,6 +465,14 @@ class Bridge:
         # ATAK's own groups use UUIDs as ids; derive a stable one from bridge name + room name
         self.mesh_room_id = room if room == ALL_CHAT else m.get(
             "chatroom_id", str(uuid.uuid5(uuid.NAMESPACE_URL, f"tak-lan-bridge/{self.name}/{room}")))
+        self.primary_room = Room(self.mesh_room_id, room, self.mesh_channel)
+        self.rooms = {self.mesh_room_id: self.primary_room}   # GeoChat room id -> Room
+        # Channels registered with "channel add": name -> {registered_by, registered_by_uid, registered_at}.
+        # Names only; the keys live on the node.
+        self.channels_file = m.get("channels_file", "channels.json")
+        self.channel_reg = {}
+        self.channel_prefix = m.get("channel_room_prefix", "Meshtastic ")
+        self.channel_lock = asyncio.Lock()
         self.mesh_max_age = timedelta(minutes=float(m.get("marker_max_age_minutes", 180)))
         # "dot": ATAK spot-map marker (small coloured dot, own "Spot Map" overlay group);
         # "symbol": a 2525 symbol of cot_type (e.g. the neutral green square a-n-G)
@@ -389,6 +496,7 @@ class Bridge:
             h = logging.FileHandler(b["loopback_log"])
             h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
             self.loop_log.addHandler(h)
+            self.loop_log.setLevel(logging.INFO)   # audit trail: whatever the main log level is
             self.loop_log.propagate = False   # _loop_log already writes to the main log
         self.to_server = asyncio.Queue(maxsize=int(srv.get("queue_size", 1000)))
         self.seen = {}
@@ -511,11 +619,10 @@ class Bridge:
     def _fanout_room(self, raw):
         """TAK clients address a room reply only to the members they know (WinTAK: just MESH-GW),
         so pass room messages on to every other TAK member via <marti><dest>."""
-        if self.mesh_room_id == ALL_CHAT:
-            return
         ev = ET.fromstring(raw)
         chat = ev.find("detail/__chat")
-        if chat is None or chat.get("id") != self.mesh_room_id:
+        room = self.rooms.get(chat.get("id")) if chat is not None else None
+        if room is None or room.id == ALL_CHAT:
             return
         d = detail_of(ev)
         marti = d.find("marti")
@@ -526,7 +633,7 @@ class Bridge:
                 already.update(u for u, cs in self.tak_users.items() if cs == x.get("callsign"))
         grp = chat.find("chatgrp")
         sender = grp.get("uid0") if grp is not None else None
-        targets = [u for u in self.tak_users if u != sender and u not in already]
+        targets = [u for u in self._room_members(room) if u != sender and u not in already]
         if not targets:
             return
         for el in (marti, d.find("__serverdestination")):
@@ -563,13 +670,15 @@ class Bridge:
                 return
             self.stats["mesh_pli"] += 1
         elif port == "TEXT_MESSAGE_APP" and packet.get("toId") == "^all":
-            if int(packet.get("channel", 0)) != self.mesh_channel:
+            room = self._room_for_channel(int(packet.get("channel", 0)))
+            if room is None:
                 self.stats["mesh_chat_other_channel"] += 1
                 return
             self._maybe_request_name(node_id, packet)
-            ev = self._mesh_chat(node_id, dec.get("text", ""))
-            self.stats["mesh_chat"] += 1
-            log.info("mesh chat %s: %s", self.mesh.node_name(node_id), dec.get("text", ""))
+            ev = self._mesh_chat(node_id, dec.get("text", ""), room)
+            self.stats["mesh_chat" if room is self.primary_room else "mesh_chat_channel_room"] += 1
+            log.info("mesh chat ch%d (%s) %s: %s", room.channel, room.name, self.mesh.node_name(node_id),
+                     dec.get("text", ""))
         else:
             return
         self._forward_mesh(ev)
@@ -593,10 +702,10 @@ class Bridge:
         log.info("no name for %s yet, requesting its node info", node_id)
         asyncio.get_running_loop().create_task(self.mesh.request_nodeinfo(packet.get("from")))
 
-    def _mesh_chat(self, node_id, text):
+    def _mesh_chat(self, node_id, text, room):
         uid = f"MESHTASTIC-{node_id.lstrip('!')}"
         name = self.mesh.node_name(node_id)
-        if self.mesh_room_id == ALL_CHAT:
+        if room.id == ALL_CHAT:
             return geochat_event(uid, name, text)
         # Sent *by the bridge contact*: every chatgrp member must be a reachable TAK contact, or ATAK
         # cannot send replies to the group. ATAK then shows MESH-GW as the author, so the node's
@@ -607,11 +716,28 @@ class Bridge:
         else:
             label = f"{name} ({short})" if short and short != name else name
         text = clip(f"[{label}] {text}")
-        return geochat_event(self.uid, name, text, room_id=self.mesh_room_id, room_name=self.mesh_room_name,
-                             members=sorted(self.tak_users), names=self._room_names())
+        return geochat_event(self.uid, name, text, room_id=room.id, room_name=room.name,
+                             members=self._room_members(room), names=self._room_names())
 
     def _room_names(self):
         return {self.uid: self.callsign, **self.tak_users}
+
+    def _room_for_channel(self, index):
+        return next((r for r in self.rooms.values() if r.channel == index), None)
+
+    def _room_members(self, room):
+        """TAK users who get a room's messages: everyone seen via the server who may access it."""
+        return sorted(u for u in self.tak_users if self._may("access", u, room))
+
+    def _may(self, action, uid, room=None):
+        """Authority hook for channel rooms. action: "register" (channel add), "remove" (channel
+        remove) or "access" (read and write in a room). Every check goes through here.
+
+        Policy for now: open, everyone may do everything. To restrict it later, decide here, e.g.
+        from [meshtastic.channels] register_uids / remove_uids lists, and an access list per room
+        kept in its registry entry (room.registered["access_uids"], managed by new "channel
+        allow/deny" commands). The config room (room.registered is None) should stay open."""
+        return True
 
     def _mesh_marker(self, node_id, pos, heard, packet=None):
         """A mesh node as a map marker (not a TAK contact: no endpoint, no team).
@@ -705,18 +831,24 @@ class Bridge:
         remarks = ev.find("detail/remarks")
         if chat is None or remarks is None:
             return
-        if chat.get("id") != self.mesh_room_id and not (
-                chat.get("id") == ALL_CHAT and self.mesh_cfg.get("all_chat_to_mesh", False)):
+        room = self.rooms.get(chat.get("id"))
+        if room is None and chat.get("id") == ALL_CHAT and self.mesh_cfg.get("all_chat_to_mesh", False):
+            room = self.primary_room
+        if room is None:
             return
         link = ev.find("detail/link")
         if link is not None and link.get("uid", "").startswith("MESHTASTIC-"):
+            return
+        grp = chat.find("chatgrp")
+        sender = (grp.get("uid0") if grp is not None else None) or (link.get("uid") if link is not None else "?")
+        if not self._may("access", sender, room):
+            self.stats["room_access_denied"] += 1
+            log.info("%s may not write in %r, not sent to the mesh", chat.get("senderCallsign", sender), room.name)
             return
         body = (remarks.text or "").strip()
         if body.startswith("@"):
             # "@<node> text" in the room: a Meshtastic DM to that node instead of the public channel.
             # Status and the node's DM replies come back privately from the bridge contact.
-            grp = chat.find("chatgrp")
-            sender = (grp.get("uid0") if grp is not None else None) or (link.get("uid") if link is not None else "?")
             self.stats["room_mention_dm"] += 1
             self._dm_to_mesh(sender, chat.get("senderCallsign", sender), body[1:])
             return
@@ -727,11 +859,12 @@ class Bridge:
             return
         self.mesh.last_send = now
         text = self._mesh_text(chat.get("senderCallsign", "?"), body)
-        asyncio.get_running_loop().create_task(self.mesh.send_text(text, self.mesh_channel))
+        asyncio.get_running_loop().create_task(self.mesh.send_text(text, room.channel))
         self.stats["chat_to_mesh"] += 1
-        log.info("chat -> mesh channel %d from %s: %s", self.mesh_channel, chat.get("senderCallsign", "?"), text)
+        log.info("chat -> mesh channel %d (%s) from %s: %s", room.channel, room.name,
+                 chat.get("senderCallsign", "?"), text)
         if self.loop_log:
-            self.loop_log.info(f"MESH ch{self.mesh_channel} from {chat.get('senderCallsign', '?')}: {text}")
+            self.loop_log.info(f"MESH ch{room.channel} ({room.name}) from {chat.get('senderCallsign', '?')}: {text}")
 
     # ---- loopback / direct messages via the bridge contact
 
@@ -784,7 +917,7 @@ class Bridge:
         self._enqueue_server(ev)
 
     def _loop_log(self, direction, who, text):
-        line = f"LOOPBACK {direction} {who}: {text}"
+        line = f"LOOPBACK {direction} {who}: {redact_links(text)}"
         log.info(line)
         if self.loop_log:
             self.loop_log.info(line)
@@ -818,6 +951,10 @@ class Bridge:
                 f"THIS CHAT ({self.callsign}):",
                 "- '@SHORT text' / '@!id text': Meshtastic DM, same as in the room.",
                 "- 'stats': bridge counters. 'roomtest': test message in the room (TAK only).",
+                "CHANNELS (private Meshtastic channels, each with its own room under Groups):",
+                "- 'channel add <meshtastic.org/e/# link>': add the channel to the gateway node.",
+                "  Room messages then go out ENCRYPTED on that channel, not on the public one.",
+                "- 'channel list', 'channel remove <name>'.",
                 "- Anything else is echoed back (loopback test).",
                 "Map: mesh nodes are neutral signal symbols (radio / radio relay); tap one for its @!id.",
                 f"Mesh sends are limited to one per {int(float(self.mesh_cfg.get('chat_min_interval_seconds', 15)))} s (duty cycle).",
@@ -836,8 +973,174 @@ class Bridge:
             self.reply(sender_uid, callsign, ", ".join(f"{k}={v}" for k, v in sorted(self.stats.items())))
         elif text.startswith("@"):
             self._dm_to_mesh(sender_uid, callsign, text[1:])
+        elif text.lower().split(" ", 1)[0] in ("channel", "channels") or CHANNEL_LINK.match(text):
+            self._channel_cmd(sender_uid, callsign, text)
         else:
             self.reply(sender_uid, callsign, f"echo: {text!r} (ATAK -> server -> bridge {lag})")
+
+    # ---- channel rooms ("channel add/list/remove")
+
+    def _load_channels(self):
+        try:
+            with open(self.channels_file) as f:
+                self.channel_reg = json.load(f).get("channels", {})
+        except FileNotFoundError:
+            self.channel_reg = {}
+        except (OSError, ValueError) as e:
+            log.warning("cannot read %s: %s (no channel rooms)", self.channels_file, e)
+            self.channel_reg = {}
+
+    def _save_channels(self):
+        tmp = f"{self.channels_file}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"channels": self.channel_reg}, f, indent=2, sort_keys=True)
+        os.replace(tmp, self.channels_file)
+
+    def _sync_channel_rooms(self):
+        """Rebuild the channel rooms from the registry and the node's channel table (by name:
+        indices shift when a channel is deleted)."""
+        self.rooms = {self.primary_room.id: self.primary_room}
+        if self.mesh is None:
+            return
+        for name, entry in self.channel_reg.items():
+            ch = self.mesh.channel_by_name(name)
+            if ch is None:
+                log.warning("registered channel %r is not on the node (any more), no room", name)
+                continue
+            if ch.index == self.primary_room.channel:
+                log.warning("registered channel %r is the config room's channel %d, skipped", name, ch.index)
+                continue
+            room = Room(channel_room_id(ch.settings), f"{self.channel_prefix}{name}", ch.index, entry)
+            self.rooms[room.id] = room
+        if len(self.rooms) > 1:
+            log.info("channel rooms: %s", ", ".join(f"ch{r.channel} -> {r.name!r}"
+                                                    for r in self.rooms.values() if r.registered))
+
+    def _room_post(self, room, text):
+        """A message from the bridge contact in a room (TAK only, nothing on air)."""
+        ev = geochat_event(self.uid, self.callsign, text, room_id=room.id, room_name=room.name,
+                           members=self._room_members(room), names=self._room_names())
+        self._tag(ev)
+        self._enqueue_server(ev)
+
+    def _channel_cmd(self, sender_uid, callsign, text):
+        words = text.split()
+        if CHANNEL_LINK.match(text):
+            words = ["channel", "add", text]
+        sub = words[1].lower() if len(words) > 1 else "list"
+        if self.mesh is None:
+            return self.reply(sender_uid, callsign, "no Meshtastic node connected")
+        if sub in ("add", "register") and len(words) > 2:
+            coro = self._channel_add(sender_uid, callsign, words[2])
+        elif sub in ("remove", "delete", "rm") and len(words) > 2:
+            coro = self._channel_remove(sender_uid, callsign, " ".join(words[2:]))
+        elif sub in ("list", "ls"):
+            return self._channel_list(sender_uid, callsign)
+        else:
+            return self.reply(sender_uid, callsign,
+                              "usage: channel add <https://meshtastic.org/e/#... link> | channel list | "
+                              "channel remove <name>")
+        asyncio.get_running_loop().create_task(self._channel_locked(sender_uid, callsign, coro))
+
+    async def _channel_locked(self, sender_uid, callsign, coro):
+        """One channel change at a time. The meshtastic library calls sys.exit() on some errors,
+        so catch BaseException: a bad link must not take the gateway down."""
+        async with self.channel_lock:
+            try:
+                await coro
+            except BaseException as e:   # noqa: B036 (SystemExit from meshtastic's our_exit)
+                if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
+                    raise
+                log.warning("channel command from %s failed: %r", callsign, e)
+                self.reply(sender_uid, callsign, f"channel command failed: {e}")
+
+    def _channel_list(self, sender_uid, callsign):
+        lines = [f"ch{self.primary_room.channel} -> {self.primary_room.name!r} (config room, public)"]
+        for r in sorted(self.rooms.values(), key=lambda r: r.channel):
+            if r.registered and self._may("access", sender_uid, r):
+                lines.append(f"ch{r.channel} -> {r.name!r}, added by {r.registered.get('registered_by', '?')} "
+                             f"{r.registered.get('registered_at', '')[:10]}")
+        missing = [n for n in self.channel_reg if not any(r.registered is self.channel_reg[n]
+                                                          for r in self.rooms.values())]
+        if missing:
+            lines.append("registered but not on the node: " + ", ".join(missing))
+        self.reply(sender_uid, callsign, "\n".join(lines))
+
+    async def _channel_add(self, sender_uid, callsign, link):
+        if not self._may("register", sender_uid):
+            self.stats["channel_denied"] += 1
+            return self.reply(sender_uid, callsign, "you may not register channels on this gateway")
+        try:
+            cs = parse_channel_link(link)
+        except ValueError as e:
+            return self.reply(sender_uid, callsign, str(e))
+        loop = asyncio.get_running_loop()
+        notes = []
+        ours = self.mesh.lora_preset()
+        if cs.HasField("lora_config") and cs.lora_config.use_preset and ours:
+            from meshtastic.protobuf import config_pb2
+            theirs = config_pb2.Config.LoRaConfig.ModemPreset.Name(cs.lora_config.modem_preset)
+            if theirs != ours[1]:
+                notes.append(f"note: the link is for {theirs}, this node runs {ours[1]} (not changed): "
+                             "only nodes on the same preset are heard")
+        for st in cs.settings:
+            if not st.name:
+                notes.append("skipped an unnamed channel (the default public channel)")
+                continue
+            existing = self.mesh.channel_by_name(st.name)
+            if existing is not None and existing.settings.psk != st.psk:
+                notes.append(f"{st.name!r}: a different channel with that name is already on the node, not changed")
+                continue
+            if existing is not None and existing.index == self.primary_room.channel:
+                notes.append(f"{st.name!r} is the config room's channel already")
+                continue
+            if existing is None:
+                index = await loop.run_in_executor(None, self.mesh.add_channel, st)
+                log.info("channel %r added to the node in slot %d by %s (%s)", st.name, index, callsign, sender_uid)
+                how = f"added to the node in slot {index}"
+                self.stats["channel_added"] += 1
+            else:
+                how = f"already on the node in slot {existing.index}"
+            self.channel_reg[st.name] = {"registered_by": callsign, "registered_by_uid": sender_uid,
+                                         "registered_at": cot_time(utcnow())}
+            try:
+                self._save_channels()
+            except OSError as e:
+                notes.append(f"could not save {self.channels_file} ({e}): the room is forgotten on restart")
+            self._sync_channel_rooms()
+            room = self._room_for_channel(self.mesh.channel_by_name(st.name).index)
+            self._room_post(room, f"room for Meshtastic channel {st.name!r} (ch{room.channel}), added by "
+                                  f"{callsign}. Messages here go out encrypted on that channel.")
+            notes.insert(0, f"channel {st.name!r} {how}. Room {room.name!r} is under Groups; "
+                            "messages in it go out ENCRYPTED on that channel")
+        self.reply(sender_uid, callsign, "\n".join(notes) or "nothing to add")
+
+    async def _channel_remove(self, sender_uid, callsign, name):
+        key = next((n for n in self.channel_reg if n.lower() == name.lower()), None)
+        if key is None:
+            return self.reply(sender_uid, callsign, f"no registered channel {name!r} (see 'channel list'). "
+                                                    "Only channels added through the gateway can be removed")
+        room = next((r for r in self.rooms.values() if r.registered is self.channel_reg[key]), None)
+        if not self._may("remove", sender_uid, room):
+            self.stats["channel_denied"] += 1
+            return self.reply(sender_uid, callsign, f"you may not remove {key!r}")
+        ch = self.mesh.channel_by_name(key)
+        if ch is not None:
+            if room is not None:
+                self._room_post(room, f"channel {key!r} removed from the gateway by {callsign}: "
+                                      "this room is no longer bridged")
+            await asyncio.get_running_loop().run_in_executor(None, self.mesh.remove_channel, ch.index)
+        del self.channel_reg[key]
+        try:
+            self._save_channels()
+        except OSError as e:
+            log.warning("cannot save %s: %s", self.channels_file, e)
+        self._sync_channel_rooms()
+        self.stats["channel_removed"] += 1
+        log.info("channel %r removed by %s (%s)", key, callsign, sender_uid)
+        self.reply(sender_uid, callsign, f"channel {key!r} removed" + ("" if ch else " (it was not on the node)")
+                   + ". The old room can be deleted in ATAK/WinTAK")
 
     def _mesh_text(self, callsign, body):
         """Text as it goes out on the mesh. By default without the TAK callsign: Meshtastic users
@@ -1039,6 +1342,8 @@ class Bridge:
         if self.mesh_cfg.get("enabled"):
             self.mesh = await loop.run_in_executor(None, MeshtasticLink, self, self.mesh_cfg, loop)
             log.info("mesh chat: channel %d <-> GeoChat room %r", self.mesh_channel, self.mesh_room_name)
+            self._load_channels()
+            self._sync_channel_rooms()
             tasks.append(self.mesh_sweep_loop())
         try:
             await asyncio.gather(*tasks)
@@ -1056,6 +1361,9 @@ def main():
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
+    # Channel registry next to the config unless set (a read-only /etc needs channels_file in [meshtastic])
+    cfg.setdefault("meshtastic", {}).setdefault(
+        "channels_file", os.path.join(os.path.dirname(os.path.abspath(args.config)), "channels.json"))
     try:
         asyncio.run(Bridge(cfg).run())
     except KeyboardInterrupt:

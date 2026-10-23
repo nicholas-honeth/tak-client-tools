@@ -17,6 +17,7 @@ Nothing secret lives in this repo. Configs, keys, certs and logs stay in a runti
 - **Server side**: one TLS stream with a client cert, XML CoT
 - **Meshtastic** (USB serial or TCP 4403): nodes become map markers (2525 symbols by role), one channel ⇄ a GeoChat room that works in ATAK and WinTAK, `@node text` sends a Meshtastic DM
 - **Loopback**: a DM to the bridge contact is echoed. `help`, `stats` and `roomtest` are commands
+- **Channel rooms**: `channel add <https://meshtastic.org/e/#… link>` in a DM to the bridge contact adds that channel to the node (free secondary slot, LoRa settings untouched) with its own GeoChat room; `channel list`, `channel remove <name>`. Registry in `channels_file` (names only). Open to every TAK user; permission checks go through `Bridge._may()` so an allowlist can be added there
 - Loop protection: `_flow-tags_`, `(uid, time, type)` dedupe, multicast loopback off, own IP ignored
 - Set `[lan] enabled = false` for a Meshtastic-only gateway, e.g. behind NAT
 
@@ -77,6 +78,7 @@ tools/run-gateway.sh stop ~/tak-client/NAME
 
 ```bash
 python3 tak-lan-bridge/tests/smoke_test.py eth0   # fake TLS TAK server + multicast on one interface
+.venv/bin/python -I tak-lan-bridge/tests/channels_test.py   # channel add/list/remove on a stub node (needs meshtastic)
 ```
 
 ## License

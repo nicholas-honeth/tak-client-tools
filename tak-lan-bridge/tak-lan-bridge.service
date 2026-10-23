@@ -16,6 +16,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadOnlyPaths=/etc/tak-lan-bridge
+# /var/lib/tak-lan-bridge, for [meshtastic] channels_file
+StateDirectory=tak-lan-bridge
 
 [Install]
 WantedBy=multi-user.target

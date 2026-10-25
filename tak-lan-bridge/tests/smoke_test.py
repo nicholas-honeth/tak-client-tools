@@ -29,7 +29,9 @@ def make_certs(d):
     def run(*a):
         subprocess.run(a, check=True, capture_output=True, cwd=d)
     run("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key", "-out", "ca.pem",
-        "-days", "1", "-subj", "/CN=test-ca")
+        "-days", "1", "-subj", "/CN=test-ca",
+        # Python 3.13+ verifies strictly (VERIFY_X509_STRICT): a CA without keyUsage is rejected
+        "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     for name, extra in (("server", "subjectAltName=IP:127.0.0.1"), ("client", "extendedKeyUsage=clientAuth")):
         run("openssl", "req", "-newkey", "rsa:2048", "-nodes", "-keyout", f"{name}.key", "-out", f"{name}.csr",
             "-subj", f"/CN={name}")

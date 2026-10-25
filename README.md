@@ -4,7 +4,7 @@ Client-side tools for an [OpenTAKServer](https://github.com/brian7704/OpenTAKSer
 
 | Path | What |
 |---|---|
-| `tak-lan-bridge/` | **tak-lan-bridge** (v0.4.1): bridges a LAN's TAK Mesh SA multicast and/or a Meshtastic node to an OTS over TLS. Single Python file, stdlib plus optional `takproto`/`meshtastic` |
+| `tak-lan-bridge/` | **tak-lan-bridge** (v0.4.2): bridges a LAN's TAK Mesh SA multicast and/or a Meshtastic node to an OTS over TLS. Single Python file, stdlib plus optional `takproto`/`meshtastic` |
 | `tools/ots-client-cert.sh` | Enrol a cert-only OTS client: key + CSR generated locally, signed by the OTS CA over SSH, `ca.pem` fetched and verified |
 | `tools/install-bridge.sh` | Install the bridge as a systemd service (`/opt/tak-lan-bridge`, `/etc/tak-lan-bridge`, user `tak-bridge`) |
 | `tools/run-gateway.sh` | Start/stop/status/log for a bridge run by hand from a runtime directory (laptop, WSL) |
@@ -21,6 +21,7 @@ Nothing secret lives in this repo. Configs, keys, certs and logs stay in a runti
 - Loop protection: `_flow-tags_`, `(uid, time, type)` dedupe, multicast loopback off, own IP ignored
 - Set `[lan] enabled = false` for a Meshtastic-only gateway, e.g. behind NAT
 - **Self-healing under systemd**: the bridge exits if the Meshtastic link is lost or the node has been silent for `mesh_idle_restart_minutes` (default 30), and `Restart=always` brings it back. The OTS connection reconnects by itself
+- **Gateway node position**: a Meshtastic node without GNSS gets the bridge position (`[bridge] lat/lon`) as its fixed position, so it reports one on the mesh (`[meshtastic] node_position = "auto"`, `"off"` to leave the node alone)
 
 Every key is documented in `tak-lan-bridge/config.example.toml`.
 

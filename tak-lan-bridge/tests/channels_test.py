@@ -231,6 +231,35 @@ async def main(tmp):
     bridge.mesh_cfg["mesh_idle_restart_minutes"] = 0
     check("idle watchdog can be switched off", await watch_raises() is None)
 
+    # node position: a node without GNSS gets the bridge position as its fixed position
+    PC = config_pb2.Config.PositionConfig
+    fixed = []
+    bridge.mesh.set_fixed_position = lambda lat, lon, alt=0: fixed.append((lat, lon))
+    bridge.cfg["bridge"].update(lat=59.308, lon=18.076)
+    pc = iface.localNode.localConfig.position
+    pc.gps_mode = PC.GpsMode.NOT_PRESENT
+    iface.nodes["!00000001"] = {"num": 1, "position": {"time": 1}}
+    await bridge._sync_node_position()
+    check("no GNSS, no position: fixed position set from [bridge]", fixed == [(59.308, 18.076)])
+    pc.fixed_position = True
+    iface.nodes["!00000001"]["position"] = {"latitude": 59.3082, "longitude": 18.0762}
+    await bridge._sync_node_position()
+    check("already fixed within tolerance: not rewritten", len(fixed) == 1)
+    iface.nodes["!00000001"]["position"] = {"latitudeI": 593470000, "longitudeI": 180730000}
+    await bridge._sync_node_position()
+    check("fixed elsewhere: moved to the bridge position", len(fixed) == 2)
+    pc.gps_mode, pc.fixed_position = PC.GpsMode.ENABLED, False
+    await bridge._sync_node_position()
+    check("node with GNSS left alone", len(fixed) == 2)
+    pc.gps_mode = PC.GpsMode.DISABLED
+    bridge.mesh_cfg.update(node_lat=59.1, node_lon=18.1)
+    await bridge._sync_node_position()
+    check("node_lat/node_lon override [bridge]", fixed[-1] == (59.1, 18.1))
+    bridge.mesh_cfg["node_position"] = "off"
+    await bridge._sync_node_position()
+    check("node_position = off never writes", len(fixed) == 3)
+    check("distance_m sane", 990 < tlb.distance_m((59.0, 18.0), (59.009, 18.0)) < 1010)
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)

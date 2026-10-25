@@ -62,6 +62,12 @@ sweep_interval_seconds = 300       # republish recently heard nodes from the nod
 sweep_rate = 10                    # markers per second during a sweep (bursts can stall OTS)
 full_sweep_every = 6               # every Nth sweep is full; the others only send nodes heard since
 mesh_idle_restart_minutes = 30     # exit (systemd restarts us) if the node sends nothing this long; 0 = off
+node_position = "auto"             # node without GNSS: set its fixed position to [bridge] lat/lon so it reports
+#                                    # one on the mesh (written only when missing/moved). "off" = never touch it
+# node_lat = 59.3470                 # use these instead of [bridge] lat/lon for the node
+# node_lon = 18.0730
+# node_alt = 0                       # metres; 0 = not set
+# node_position_tolerance_m = 50     # rewrite only if the node's fixed position is further off than this
 chat_to_mesh = true                # messages posted in the room -> mesh broadcast on channel_index
 all_chat_to_mesh = false           # also forward All Chat Rooms
 show_tak_callsign = false          # prefix mesh texts with "<TAK callsign>: " (always logged either way)

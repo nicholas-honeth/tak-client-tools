@@ -30,6 +30,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -42,7 +43,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 log = logging.getLogger("tak-lan-bridge")
 MESH_WATCH_SECONDS = 30            # how often mesh_watch_loop checks the node link
 
@@ -172,6 +173,12 @@ def parse_cot_time(text):
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+def distance_m(a, b):
+    """Equirectangular distance in metres between (lat, lon) pairs; fine at gateway scales."""
+    x = math.radians(b[1] - a[1]) * math.cos(math.radians((a[0] + b[0]) / 2))
+    return 6371000 * math.hypot(x, math.radians(b[0] - a[0]))
 
 
 def new_event(uid, cot_type, how, lat, lon, stale_after, hae=9999999.0, ce=9999999.0, le=9999999.0):
@@ -431,6 +438,23 @@ class MeshtasticLink:
         if node.channels[index].role != channel_pb2.Channel.Role.SECONDARY:
             raise ValueError(f"channel {index} is not a secondary channel")
         node.deleteChannel(index)
+
+    def own_position(self):
+        """(gps_mode name, fixed_position flag, (lat, lon) or None) of our node, or None if the
+        config isn't loaded."""
+        from meshtastic.protobuf import config_pb2
+        pc = getattr(self.iface.localNode.localConfig, "position", None)
+        if pc is None or self.my_num is None:
+            return None
+        pos = self.node(f"!{self.my_num:08x}").get("position") or {}
+        lat = pos.get("latitude", pos.get("latitudeI", 0) * 1e-7)
+        lon = pos.get("longitude", pos.get("longitudeI", 0) * 1e-7)
+        mode = config_pb2.Config.PositionConfig.GpsMode.Name(pc.gps_mode)
+        return mode, pc.fixed_position, ((lat, lon) if lat or lon else None)
+
+    def set_fixed_position(self, lat, lon, alt=0):
+        """Give our node a fixed position; the firmware sets fixed_position and broadcasts it."""
+        self.iface.localNode.setFixedPosition(float(lat), float(lon), int(alt))
 
     def lora_preset(self):
         """(region, modem preset) names of our node, or None."""
@@ -804,6 +828,40 @@ class Bridge:
         ET.SubElement(d, "precisionlocation", geopointsrc="GPS", altsrc="GPS")
         return ev
 
+    async def _sync_node_position(self):
+        """node_position = "auto": a node without GNSS gets the bridge position ([bridge] lat/lon,
+        or [meshtastic] node_lat/node_lon) as its fixed position, so it reports one on the mesh.
+        Written only when missing or off by more than node_position_tolerance_m (saves flash).
+        A node with gps_mode ENABLED is left alone; "off" never touches the node."""
+        if self.mesh_cfg.get("node_position", "auto") != "auto":
+            return
+        b = self.cfg["bridge"]
+        lat = float(self.mesh_cfg.get("node_lat", b.get("lat", 0)))
+        lon = float(self.mesh_cfg.get("node_lon", b.get("lon", 0)))
+        if not lat and not lon:
+            return
+        state = self.mesh.own_position()
+        if state is None:
+            log.warning("node position: node config not loaded, not checked")
+            return
+        mode, fixed, have = state
+        if mode == "ENABLED":
+            log.info("node position: node has GNSS (gps_mode ENABLED), left alone")
+            return
+        tol = float(self.mesh_cfg.get("node_position_tolerance_m", 50))
+        if fixed and have and distance_m(have, (lat, lon)) <= tol:
+            log.info("node position: fixed at %.5f, %.5f (gps_mode %s)", *have, mode)
+            return
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, self.mesh.set_fixed_position, lat, lon, int(self.mesh_cfg.get("node_alt", 0)))
+        except BaseException as e:   # the meshtastic lib may sys.exit()
+            log.warning("node position: setting fixed position failed: %r", e)
+            return
+        log.info("node position: set fixed %.5f, %.5f (gps_mode %s, was %s)", lat, lon, mode,
+                 f"{'fixed' if fixed else 'not fixed'} at {have[0]:.5f}, {have[1]:.5f}" if have
+                 else f"{'fixed' if fixed else 'not fixed'}, none")
+
     async def mesh_sweep_loop(self):
         """Publish nodes from the node database that have a position and were heard recently.
         Fills the map at start-up and keeps markers alive between (infrequent) position packets.
@@ -814,11 +872,14 @@ class Bridge:
         rate = float(self.mesh_cfg.get("sweep_rate", 10))
         full_every = int(self.mesh_cfg.get("full_sweep_every", 6))
         sent_heard = {}    # node_id -> lastHeard we last published
+        own = f"!{self.mesh.my_num:08x}" if self.mesh.my_num is not None else None   # = the bridge marker
         rnd = 0
         while True:
             full = rnd % full_every == 0
             n, skipped, roles = 0, 0, collections.Counter()
             for node_id, node in self.mesh.nodes():
+                if node_id == own:
+                    continue
                 last = node.get("lastHeard") or (node.get("position") or {}).get("time")
                 if not last:
                     continue
@@ -1373,6 +1434,7 @@ class Bridge:
             log.info("mesh chat: channel %d <-> GeoChat room %r", self.mesh_channel, self.mesh_room_name)
             self._load_channels()
             self._sync_channel_rooms()
+            await self._sync_node_position()
             tasks += [self.mesh_sweep_loop(), self.mesh_watch_loop()]
         try:
             await asyncio.gather(*tasks)
